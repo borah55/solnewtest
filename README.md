@@ -107,6 +107,8 @@ front-end has been replaced by a brand-new theme called **Nova**.
 
 ## Installation
 
+The five-line summary:
+
 1. Upload the project to your webroot (or `git clone` it).
 2. Make sure `/config/`, `/resources/`, and `/storage/` are writable by
    PHP.
@@ -116,6 +118,9 @@ front-end has been replaced by a brand-new theme called **Nova**.
 5. The installer creates the schema, seeds the `config` table, writes
    `config/config.php`, and removes itself. You're redirected to the admin
    sign-in page.
+
+For the full walk-through (Apache / Nginx config, FaucetPay setup, SMTP,
+captcha, HTTPS, troubleshooting), see [**INSTALL.md**](INSTALL.md).
 
 ## Configuration
 
