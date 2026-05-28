@@ -1,475 +1,414 @@
 <?php
-
 /**
- * Fernico - Ridiculously lite PHP framework
+ * Framework helper functions.
  *
- * @author Areeb Majeed, Volcrado Holdings
+ * These free functions are available globally once the framework boots.
+ * Anything that doesn't naturally fit on a class lives here.
+ *
  * @package Fernico
- * @copyright 2017 - Volcrado Holdings Limited
- * @license https://opensource.org/licenses/MIT MIT License
- * @link https://volcrado.com/
- *
  */
 
 if (!defined('FERNICO')) {
-    fernico_destroy();
+    http_response_code(403);
+    exit('Forbidden');
 }
 
-/*
- * This file contains crucial Fernico functions that are used across the system.
+/**
+ * Persist an error to the configured destination (DB or file).
  */
-
-
-/*
- * This function can be used to log the errors.
- * Errors are usually logged in the database, but can also be set to log in the a file.
- */
-
-function fernico_reportError($error) {
-
+function fernico_reportError($error)
+{
     global $fernico_db;
 
-    if (Config::fetch('ERROR_REPORTING') == true) {
+    if (!Config::fetch('ERROR_REPORTING')) {
+        return;
+    }
 
-        if (Config::fetch('ERROR_LOG_DATABASE') == true) {
+    $error = (string) $error;
 
-            $stmt = $fernico_db->stmt_init();
-            $stmt->prepare("INSERT INTO error_log (message) VALUES (?)");
-            $stmt->bind_param("s", $error);
+    if (Config::fetch('ERROR_LOG_DATABASE') && isset($fernico_db) && $fernico_db instanceof mysqli) {
+        $stmt = $fernico_db->prepare('INSERT INTO error_log (message) VALUES (?)');
+        if ($stmt) {
+            $stmt->bind_param('s', $error);
             $stmt->execute();
             $stmt->close();
-
-        } else {
-
-            $error_file = fopen(FERNICO_PATH . "/storage/log/error.log", "a");
-            fwrite($error_file, PHP_EOL . $error);
-            fclose($error_file);
-
         }
+        return;
     }
 
+    $logFile = FERNICO_PATH . '/storage/log/error.log';
+    if (!is_dir(dirname($logFile))) {
+        @mkdir(dirname($logFile), 0755, true);
+    }
+
+    $line = '[' . date('Y-m-d H:i:s') . '] ' . $error . PHP_EOL;
+    @file_put_contents($logFile, $line, FILE_APPEND);
 }
 
-/*
- * This function allows you to send GET requests.
- * Equivalent of file_get_contents(), but in cURL.
+/**
+ * Lightweight cURL GET wrapper. Returns the body or false on failure.
  */
-
-function fernico_get($url) {
-
+function fernico_get($url)
+{
     $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_VERBOSE, true);
-    curl_setopt($ch, CURLOPT_STDERR, fopen('php://stderr', 'w'));
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 400);
+    curl_setopt_array($ch, [
+        CURLOPT_URL            => $url,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_TIMEOUT        => 30,
+        CURLOPT_USERAGENT      => 'Solnew/1.0 (+fernico)',
+    ]);
     $data = curl_exec($ch);
     curl_close($ch);
-
     return $data;
-
 }
 
-/*
- * This function allows you to send POST data.
- * Uses cURL to send the data.
+/**
+ * Lightweight cURL POST wrapper using application/x-www-form-urlencoded.
  */
-
-function fernico_post($url, $data = array()) {
-
-    $fields_string = '';
-
-    foreach ($data as $key => $value) {
-        $fields_string .= $key . '=' . $value . '&';
-    }
-
-    rtrim($fields_string, '&');
-
+function fernico_post($url, array $data = [])
+{
     $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_VERBOSE, true);
-    curl_setopt($ch, CURLOPT_STDERR, fopen('php://stderr', 'w'));
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 600);
-    curl_setopt($ch, CURLOPT_POST, count($data));
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $fields_string);
+    curl_setopt_array($ch, [
+        CURLOPT_URL            => $url,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_TIMEOUT        => 60,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => http_build_query($data),
+        CURLOPT_USERAGENT      => 'Solnew/1.0 (+fernico)',
+    ]);
     $result = curl_exec($ch);
     curl_close($ch);
-
     return $result;
-
 }
 
-/*
- * This function destroys the process. It can also raise an error.
+/**
+ * Tear down the request cleanly. If passed an error string we log it
+ * before exiting.
  */
-
-function fernico_destroy($error = null) {
-
+function fernico_destroy($error = null)
+{
     global $fernico_db;
 
-    if ($error != null) {
+    if ($error !== null) {
         fernico_reportError($error);
     }
 
-    if (isset($fernico_db)) {
-        $fernico_db->close();
+    if (isset($fernico_db) && $fernico_db instanceof mysqli) {
+        @$fernico_db->close();
     }
 
-    exit();
-
+    exit;
 }
 
-/*
- * Simple function to tell you what version you're using.
+/**
+ * Read the framework version string from disk.
  */
-
-function fernico_version() {
-
-    $handle = fopen(FERNICO_PATH . '/lib/Astrid/Version.php', "r");
-    $contents = fread($handle, filesize(FERNICO_PATH . '/lib/Astrid/Version.php'));
-    fclose($handle);
-
-    return $contents;
-
+function fernico_version()
+{
+    $file = FERNICO_PATH . '/lib/Astrid/Version.php';
+    if (!is_readable($file)) {
+        return 'unknown';
+    }
+    return trim((string) file_get_contents($file));
 }
 
-/*
- * This function can be used to render a template manually, instead of using the AstridController.
+/**
+ * Render a template manually (without going through a controller).
  */
+function fernico_loadComponent($template_dir, $template, array $options = [])
+{
+    $smarty = new Smarty();
 
-function fernico_loadComponent($template_dir, $template, $options) {
+    $options = array_merge([
+        'csrf_token' => fernico_generateAntiCSRFToken(),
+        'site_url'   => fernico_getAbsURL(),
+        'flash'      => isset($_SESSION['flash']) ? (string) $_SESSION['flash'] : '',
+    ], $options);
 
-    $smarty = new Smarty;
+    // Flash is one-shot.
+    unset($_SESSION['flash']);
 
     foreach ($options as $key => $value) {
         $smarty->assign($key, $value);
     }
 
-    if (defined("CSS_FIX")) {
-        $smarty->assign("css_fix", CSS_FIX);
+    if (defined('CSS_FIX')) {
+        $smarty->assign('css_fix', CSS_FIX);
     }
 
-    $smarty->setCompileDir(Config::fetch('TEMPLATE_COMPILED_DIR'));
+    $compileDir = Config::fetch('TEMPLATE_COMPILED_DIR');
+    if ($compileDir && !is_dir($compileDir)) {
+        @mkdir($compileDir, 0755, true);
+    }
+    $smarty->setCompileDir($compileDir);
     $smarty->loadFilter('output', 'trimwhitespace');
     $smarty->display(FERNICO_PATH . '/views/' . $template_dir . '/' . $template);
-
 }
 
-/*
- * This function handles non-critical errors that do not terminate the system.
+/**
+ * Non-fatal error handler. Just records the problem and lets PHP carry
+ * on. The shutdown handler picks up anything fatal.
  */
-
-function fernico_nonCriticalErrorHandler($err_no, $err_str, $err_file, $err_line) {
-
-    $error = "[" . $err_line . "] [" . $err_file . "] $err_str";
-    fernico_reportError($error);
-
+function fernico_nonCriticalErrorHandler($err_no, $err_str, $err_file, $err_line)
+{
+    // Respect @suppression and the configured error_reporting() mask.
+    if (!(error_reporting() & $err_no)) {
+        return false;
+    }
+    fernico_reportError("[$err_file:$err_line] $err_str");
+    return false; // Allow PHP's normal handler to also run.
 }
 
-/*
- * This function handles critical errors that break the script. It logs the errors and shows necessary debugging infromation.
+/**
+ * Shutdown function that catches truly fatal errors (parse errors etc.)
+ * and routes them to the friendly fatal-error page.
  */
-
-function fernico_criticalErrorHandler() {
-
+function fernico_criticalErrorHandler()
+{
     $error = error_get_last();
-
-    if (in_array($error['type'], array(E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR))) {
-
-        $error_msg = $error['message'];
-        $err_text = "A critical error occurred in the application. Terminating.";
-
-        fernico_reportError($error_msg);
-        fernico_callController('fatalError', 'errorHandler', array($err_text, $error_msg));
-        fernico_destroy();
-
+    if (!$error) {
+        return;
     }
 
+    $fatal = [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR];
+    if (!in_array($error['type'], $fatal, true)) {
+        return;
+    }
+
+    fernico_reportError($error['message']);
+
+    // Avoid recursion if the fatal error happened inside the controller.
+    if (defined('FERNICO_FATAL_HANDLED')) {
+        return;
+    }
+    define('FERNICO_FATAL_HANDLED', true);
+
+    if (file_exists(FERNICO_PATH . '/controllers/fatalErrorController.php')) {
+        fernico_callController('fatalError', 'errorHandler', [
+            'A critical error occurred in the application. Terminating.',
+            $error['message'],
+        ]);
+    }
+
+    fernico_destroy();
 }
 
-/*
- * This function allows you to call a controller with a method and parameters.
+/**
+ * Dispatch to a controller manually. Only the fatal/error flows use
+ * this; normal traffic goes through the kernel.
  */
+function fernico_callController($name, $method, array $parameters = [])
+{
+    $name = $name . 'Controller';
+    $path = FERNICO_PATH . '/controllers/' . $name . '.php';
+    if (!file_exists($path)) {
+        return;
+    }
+    require_once $path;
 
-function fernico_callController($name, $method, $parameters) {
-
-    $name = $name . "Controller";
-    require(FERNICO_PATH . '/controllers/' . $name . '.php');
+    if (!class_exists($name)) {
+        return;
+    }
     $controller = new $name();
 
-    if (!empty($parameters)) {
-        call_user_func_array(array($controller, $method), $parameters);
+    if (!method_exists($controller, $method)) {
+        return;
+    }
+
+    if ($parameters) {
+        call_user_func_array([$controller, $method], $parameters);
     } else {
         $controller->{$method}();
     }
-
 }
 
-/*
- * Returns a list of active functions.
- */
-
-function fernico_showLoadedFunctions() {
-
+function fernico_showLoadedFunctions()
+{
     global $global_fernico_plugins;
     return $global_fernico_plugins;
-
 }
 
-/*
- * Registers a hook enabling developers to perform tasks when a function is called.
+/**
+ * Register a callable to fire when a function is invoked. Hooks are
+ * stored in $fernico_hooks_registered and dispatched by
+ * fernico_executeHooks().
  */
-
-function fernico_registerHook($function, $callback, $parameters = array()) {
-
+function fernico_registerHook($function, $callback, array $parameters = [])
+{
     global $fernico_hooks_registered;
 
-    $ar = array(
-        "onFunction" => $function,
-        "callFunction" => $callback,
-        "withParameters" => $parameters
+    if (!is_array($fernico_hooks_registered)) {
+        $fernico_hooks_registered = [];
+    }
+
+    $fernico_hooks_registered[] = [
+        'onFunction'     => $function,
+        'callFunction'   => $callback,
+        'withParameters' => $parameters,
+    ];
+}
+
+/**
+ * Walk the hook list and call any callbacks attached to whichever
+ * function this is invoked from.
+ */
+function fernico_executeHooks()
+{
+    global $fernico_hooks_registered;
+
+    if (!is_array($fernico_hooks_registered) || !$fernico_hooks_registered) {
+        return null;
+    }
+
+    $caller = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 2)[1]['function'] ?? null;
+    if (!$caller) {
+        return null;
+    }
+
+    foreach ($fernico_hooks_registered as $hook) {
+        if ($hook['onFunction'] !== $caller) {
+            continue;
+        }
+        if (is_array($hook['withParameters'])) {
+            return call_user_func_array($hook['callFunction'], $hook['withParameters']);
+        }
+        return ($hook['callFunction'])($hook['withParameters']);
+    }
+
+    return null;
+}
+
+/**
+ * Generate a fresh CSRF token, store it in the session, and return it.
+ * Existing tokens are reused for the lifetime of the session to avoid
+ * breaking forms in multiple browser tabs.
+ */
+function fernico_generateAntiCSRFToken()
+{
+    if (empty($_SESSION['fernico_token'])) {
+        $_SESSION['fernico_token'] = bin2hex(random_bytes(32));
+    }
+    return $_SESSION['fernico_token'];
+}
+
+/**
+ * Constant-time CSRF token comparison.
+ */
+function fernico_verifyAntiCSRFToken($input_token)
+{
+    if (empty($_SESSION['fernico_token']) || !is_string($input_token)) {
+        return false;
+    }
+    return hash_equals($_SESSION['fernico_token'], $input_token);
+}
+
+/**
+ * Build the absolute URL of the application's root, with a trailing
+ * slash. Honours the WEBSITE_URL config override when set.
+ *
+ * The previous version's scheme detection was inverted (it set the
+ * scheme to https when the port was *not* 80). This version derives
+ * the scheme from HTTPS / HTTP_X_FORWARDED_PROTO / SERVER_PORT.
+ */
+function fernico_getAbsURL()
+{
+    $configured = Config::fetch('WEBSITE_URL');
+    if (!empty($configured)) {
+        return rtrim($configured, '/') . '/';
+    }
+
+    // Forwarded protocol (CDN/proxy in front of us).
+    if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO'])) {
+        $scheme = strtolower(explode(',', $_SERVER['HTTP_X_FORWARDED_PROTO'])[0]);
+    } elseif (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
+        $scheme = 'https';
+    } elseif (!empty($_SERVER['REQUEST_SCHEME'])) {
+        $scheme = $_SERVER['REQUEST_SCHEME'];
+    } elseif (!empty($_SERVER['SERVER_PORT']) && (int) $_SERVER['SERVER_PORT'] === 443) {
+        $scheme = 'https';
+    } else {
+        $scheme = 'http';
+    }
+
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+
+    return $scheme . '://' . $host . '/';
+}
+
+/**
+ * Best-effort visitor IP extraction. Honours common proxy headers but
+ * skips RFC1918 / loopback / link-local.
+ */
+function fernico_getIPAddress()
+{
+    $candidates = [
+        $_SERVER['HTTP_CLIENT_IP'] ?? null,
+        $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null,
+        $_SERVER['HTTP_X_FORWARDED'] ?? null,
+        $_SERVER['HTTP_X_CLUSTER_CLIENT_IP'] ?? null,
+        $_SERVER['HTTP_FORWARDED_FOR'] ?? null,
+        $_SERVER['HTTP_FORWARDED'] ?? null,
+    ];
+
+    foreach ($candidates as $header) {
+        if (!$header) {
+            continue;
+        }
+        // Some headers contain a comma-separated chain - pick the first
+        // public IP in the list.
+        foreach (explode(',', $header) as $candidate) {
+            $candidate = trim($candidate);
+            if (fernico_validateIPAddress($candidate)) {
+                return $candidate;
+            }
+        }
+    }
+
+    return $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+}
+
+/**
+ * Validate a public-routable IPv4 / IPv6 address.
+ */
+function fernico_validateIPAddress($ip)
+{
+    if (!is_string($ip) || strtolower($ip) === 'unknown' || $ip === '') {
+        return false;
+    }
+
+    return (bool) filter_var(
+        $ip,
+        FILTER_VALIDATE_IP,
+        FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE
     );
-
-    $fernico_hooks_registered[] = $ar;
-
 }
 
-/*
- * This function must be called whenever you want to execute the hooks assigned for your function.
+/**
+ * Resolve the visitor's two-letter ISO country code. Tries Cloudflare's
+ * header first (zero-cost) then falls back to ipinfo.io. Returns the
+ * empty string when nothing succeeds.
  */
-
-function fernico_executeHooks() {
-
-    global $fernico_hooks_registered;
-
-    $fn_name = debug_backtrace()[1]['function'];
-    $found_hooks = array_keys(array_column($fernico_hooks_registered, 'onFunction'), $fn_name);
-
-    foreach ($found_hooks as $val) {
-
-        $callFunction = $fernico_hooks_registered[$val]['callFunction'];
-        $withParameters = $fernico_hooks_registered[$val]['withParameters'];
-
-        if (is_array($withParameters)) {
-            return call_user_func_array($callFunction, $withParameters);
-        } else {
-            return $callFunction($withParameters);
-        }
-
+function fernico_countryCode()
+{
+    $cf = Request::cleanInput($_SERVER['HTTP_CF_IPCOUNTRY'] ?? '');
+    if ($cf && $cf !== 'XX') {
+        return $cf;
     }
 
+    $ip = fernico_getIPAddress();
+    $json = fernico_get('https://ipinfo.io/' . urlencode($ip) . '/json');
+    if (!$json) {
+        return '';
+    }
+
+    $data = json_decode($json, true);
+    return is_array($data) && !empty($data['country']) ? $data['country'] : '';
 }
 
-/*
- * Generate a quick, secure CSRF token. Include it in the SESSION and return it.
- */
-
-function fernico_generateAntiCSRFToken() {
-    $fernico_token = bin2hex(random_bytes(32));
-    $_SESSION['fernico_token'] = $fernico_token;
-    return $fernico_token;
-}
-
-/*
- * Validates the user input token. This function uses hash_equals() function to mitigate timing attack attempts.
- */
-
-function fernico_verifyAntiCSRFToken($input_token) {
-
-    if (hash_equals($_SESSION['fernico_token'], $input_token)) {
-        return true;
-    } else {
-        return false;
-    }
-
-}
-
-/*
- * Gets the exact URL with a trailing slash at the end.
- */
-
-function fernico_getAbsURL() {
-
-    if (Config::fetch('WEBSITE_URL') == "") {
-
-        $delimiter = '';
-
-        if (Request::GET('param')) {
-            $delimiter = Request::GET('param', true);
-        }
-
-        if ($delimiter == "/") {
-            $delimiter = "";
-        }
-
-        if ($delimiter != "") {
-
-            $request_uri = explode($delimiter, $_SERVER['REQUEST_URI']);
-
-        } else {
-
-            $request_uri = array();
-            $request_uri[0] = $_SERVER['REQUEST_URI'];
-
-        }
-
-        if (substr($request_uri[0], -1) == "/") {
-            $request_uri[0] = trim($request_uri[0]);
-        }
-
-        if (isset($_SERVER['HTTP_X_FORWARDED_PROTO'])) {
-            $scheme = $_SERVER['HTTP_X_FORWARDED_PROTO'];
-        } else {
-            $scheme = $_SERVER['REQUEST_SCHEME'];
-        }
-
-        if($scheme == "") {
-
-            $scheme = 'http';
-
-            if($_SERVER['SERVER_PORT'] != 80) {
-                $scheme = 'https';
-            }
-
-        }
-
-        $url = $scheme . "://" . $_SERVER['HTTP_HOST'] . "/";
-
-    } else {
-
-        $url = Config::fetch('WEBSITE_URL');
-        $url = rtrim($url, "/") . "/";
-
-    }
-
-    return $url;
-
-}
-
-/*
- * Get user IP address.
- */
-
-function fernico_getIPAddress() {
-    // check for shared internet/ISP IP
-    if (!empty($_SERVER['HTTP_CLIENT_IP']) && fernico_validateIPAddress($_SERVER['HTTP_CLIENT_IP'])) {
-        return $_SERVER['HTTP_CLIENT_IP'];
-    }
-
-    // check for IPs passing through proxies
-    if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-        // check if multiple ips exist in var
-        if (strpos($_SERVER['HTTP_X_FORWARDED_FOR'], ',') !== false) {
-            $iplist = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']);
-            foreach ($iplist as $ip) {
-                if (fernico_validateIPAddress($ip)) {
-                    return $ip;
-                }
-            }
-        } else {
-            if (fernico_validateIPAddress($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-                return $_SERVER['HTTP_X_FORWARDED_FOR'];
-            }
-        }
-    }
-    if (!empty($_SERVER['HTTP_X_FORWARDED']) && fernico_validateIPAddress($_SERVER['HTTP_X_FORWARDED'])) {
-        return $_SERVER['HTTP_X_FORWARDED'];
-    }
-    if (!empty($_SERVER['HTTP_X_CLUSTER_CLIENT_IP']) && fernico_validateIPAddress($_SERVER['HTTP_X_CLUSTER_CLIENT_IP'])) {
-        return $_SERVER['HTTP_X_CLUSTER_CLIENT_IP'];
-    }
-    if (!empty($_SERVER['HTTP_FORWARDED_FOR']) && fernico_validateIPAddress($_SERVER['HTTP_FORWARDED_FOR'])) {
-        return $_SERVER['HTTP_FORWARDED_FOR'];
-    }
-    if (!empty($_SERVER['HTTP_FORWARDED']) && fernico_validateIPAddress($_SERVER['HTTP_FORWARDED'])) {
-        return $_SERVER['HTTP_FORWARDED'];
-    }
-
-    // return unreliable ip since all else failed
-    return $_SERVER['REMOTE_ADDR'];
-}
-
-/*
- * Validate an IP address.
- */
-
-function fernico_validateIPAddress($ip) {
-    if (strtolower($ip) === 'unknown') {
-        return false;
-    }
-
-    // generate ipv4 network address
-    $ip = ip2long($ip);
-
-    // if the ip is set and not equivalent to 255.255.255.255
-    if ($ip !== false && $ip !== -1) {
-        // make sure to get unsigned long representation of ip
-        // due to discrepancies between 32 and 64 bit OSes and
-        // signed numbers (ints default to signed in PHP)
-        $ip = sprintf('%u', $ip);
-        // do private network range checking
-        if ($ip >= 0 && $ip <= 50331647) {
-            return false;
-        }
-        if ($ip >= 167772160 && $ip <= 184549375) {
-            return false;
-        }
-        if ($ip >= 2130706432 && $ip <= 2147483647) {
-            return false;
-        }
-        if ($ip >= 2851995648 && $ip <= 2852061183) {
-            return false;
-        }
-        if ($ip >= 2886729728 && $ip <= 2887778303) {
-            return false;
-        }
-        if ($ip >= 3221225984 && $ip <= 3221226239) {
-            return false;
-        }
-        if ($ip >= 3232235520 && $ip <= 3232301055) {
-            return false;
-        }
-        if ($ip >= 4294967040) {
-            return false;
-        }
-    }
-    return true;
-}
-
-/*
- * Get user country (ISO Code).
- */
-
-function fernico_countryCode() {
-
-    $country = Request::cleanInput(@$_SERVER["HTTP_CF_IPCOUNTRY"]);
-
-    if ($country == "XX" OR $country == "") {
-
-        $country = fernico_get('http://freegeoip.net/json/' . fernico_getIPAddress());
-        $country = json_decode($country, true);
-        $country = $country['country_code'];
-
-        if ($country == "") {
-
-            $json = fernico_get("http://ipinfo.io/" . fernico_getIPAddress() . "/geo");
-            $details = json_decode($json, true);
-            $country = $details['country'];
-
-        }
-
-    }
-
-    return $country;
-
-}
-
-/*
- * Not much, just set the error handlers.
- */
-
-set_error_handler("fernico_nonCriticalErrorHandler", E_ALL);
+// Register the framework's error handlers.
+set_error_handler('fernico_nonCriticalErrorHandler', E_ALL);
 register_shutdown_function('fernico_criticalErrorHandler');

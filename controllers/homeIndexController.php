@@ -1,39 +1,43 @@
 <?php
-
 /**
- * Fernico - Ridiculously lite PHP framework
+ * Home page controller.
  *
- * @author Areeb Majeed, Volcrado Holdings
- * @package Fernico
- * @copyright 2017 - Volcrado Holdings Limited
- * @license https://opensource.org/licenses/MIT MIT License
- * @link https://volcrado.com/
+ * Lists the latest 15 successful claims and powers the marketing page.
  *
+ * @package Solnew
  */
 
 if (!defined('FERNICO')) {
-    fernico_destroy();
+    http_response_code(403);
+    exit('Forbidden');
 }
 
-class homeIndexController extends AstridController {
+class homeIndexController extends AstridController
+{
+    /** @var Authentication */
+    public $auth;
 
-    public function __construct() {
-        require_once(FERNICO_PATH . "/models/Bootstrapper.php");
+    public function __construct()
+    {
+        require_once FERNICO_PATH . '/models/Bootstrapper.php';
         parent::__construct();
         $this->auth = new Authentication();
     }
 
-    public function home() {
-
+    public function home()
+    {
         global $fernico_db;
 
-        $opt = array(
-            'pageName' => App::loadSiteVar('website_homepage_title'),
-            'claims_registered' => $fernico_db->query("SELECT id, user_name, amount_credited, time FROM claims_registered ORDER BY id DESC LIMIT 15")
+        $claims = $fernico_db->query(
+            'SELECT id, user_name, amount_credited, time
+               FROM claims_registered
+              ORDER BY id DESC
+              LIMIT 15'
         );
 
-        $this->renderTemplate('Home.tpl', $opt);
-
+        $this->renderTemplate('Home.tpl', [
+            'pageName'          => App::loadSiteVar('website_homepage_title') ?: 'Home',
+            'claims_registered' => $claims,
+        ]);
     }
-
 }

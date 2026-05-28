@@ -1,184 +1,163 @@
 <?php
+/**
+ * Helper functions used by the installer wizard.
+ *
+ * @package Solnew\Installer
+ */
 
-function is_valid_domain_name($domain_name) {
-    return (preg_match("/^([a-z\d](-*[a-z\d])*)(\.([a-z\d](-*[a-z\d])*))*$/i", $domain_name) //valid chars check
-        && preg_match("/^.{1,253}$/", $domain_name) //overall length check
-        && preg_match("/^[^\.]{1,63}(\.[^\.]{1,63})*$/", $domain_name)); //length of each label
+if (!defined('FERNICO')) {
+    http_response_code(403);
+    exit('Forbidden');
 }
 
-function getURL() {
+function installer_is_valid_domain($domain)
+{
+    return (bool) preg_match(
+        '/^([a-z\d](-*[a-z\d])*)(\.([a-z\d](-*[a-z\d])*))*$/i',
+        $domain
+    ) && preg_match('/^.{1,253}$/', $domain)
+      && preg_match('/^[^\.]{1,63}(\.[^\.]{1,63})*$/', $domain);
+}
 
-    $delimiter = '';
-
-    if ($_GET['param']) {
-        $delimiter = $_GET['param'];
+function installer_clean_input($input)
+{
+    if (!is_string($input)) {
+        return $input;
     }
+    $input = preg_replace('/[\x00-\x1F\x7F]/u', '', $input);
+    return trim(strip_tags($input));
+}
 
-    if ($delimiter == "/") {
-        $delimiter = "";
-    }
-
-    if ($delimiter != "") {
-
-        $request_uri = explode($delimiter, $_SERVER['REQUEST_URI']);
-
-    } else {
-
-        $request_uri = array();
-        $request_uri[0] = $_SERVER['REQUEST_URI'];
-
-    }
-
-    if (substr($request_uri[0], -1) == "/") {
-        $request_uri[0] = trim($request_uri[0]);
-    }
-
-    if (isset($_SERVER['HTTP_X_FORWARDED_PROTO'])) {
-        $scheme = $_SERVER['HTTP_X_FORWARDED_PROTO'];
-    } else {
+function installer_detect_url()
+{
+    if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO'])) {
+        $scheme = strtolower(explode(',', $_SERVER['HTTP_X_FORWARDED_PROTO'])[0]);
+    } elseif (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
+        $scheme = 'https';
+    } elseif (!empty($_SERVER['REQUEST_SCHEME'])) {
         $scheme = $_SERVER['REQUEST_SCHEME'];
-    }
-
-    if ($scheme == "") {
-
+    } else {
         $scheme = 'http';
-
-        if ($_SERVER['SERVER_PORT'] != 80) {
-            $scheme = 'https';
-        }
-
     }
-
-    $url = $scheme . "://" . $_SERVER['HTTP_HOST'] . "/";
-
-    return $url;
-
+    return $scheme . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . '/';
 }
 
-function rrmdir($dir) {
-    if (is_dir($dir)) {
-        $objects = scandir($dir);
-        foreach ($objects as $object) {
-            if ($object != "." && $object != "..") {
-                if (is_dir($dir . "/" . $object)) {
-                    rrmdir($dir . "/" . $object);
-                } else {
-                    unlink($dir . "/" . $object);
-                }
-            }
-        }
-        rmdir($dir);
+function installer_rrmdir($dir)
+{
+    if (!is_dir($dir)) {
+        return;
     }
+    foreach (scandir($dir) as $object) {
+        if ($object === '.' || $object === '..') {
+            continue;
+        }
+        $path = $dir . DIRECTORY_SEPARATOR . $object;
+        if (is_dir($path)) {
+            installer_rrmdir($path);
+        } else {
+            @unlink($path);
+        }
+    }
+    @rmdir($dir);
 }
 
-
-function cleanInput($input) {
-
-    $search = array(
-        '@<script[^>]*?>.*?</script>@si',
-        '@<[\/\!]*?[^<>]*?>@si',
-        '@<style[^>]*?>.*?</style>@siU',
-        '@<![\s\S]*?--[ \t\n\r]*>@'
-    );
-
-    $wipe = array(
-
-        "+union+",
-        "%20union%20",
-        "/union/*",
-        ' union '
-
-    );
-
-    $output = preg_replace($search, '', $input);
-    $output = str_replace($wipe, '', $output);
-
-    return addslashes(trim($output));
-
-}
-
-function vomitHeader() {
-
+/**
+ * Render the wizard's <head> + opening <body> + minimal styling.
+ */
+function installer_header($pageName)
+{
     echo '<!DOCTYPE html>
-    <html lang="en-us">
-    <head>
-    <meta charset="utf-8">
-    <title>Installer</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link href="https://fonts.googleapis.com/css?family=Raleway:400,600" rel="stylesheet">
-    </head>
-    <body>
-    <style>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>' . htmlspecialchars($pageName) . ' | Solnew Installer</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
     body {
-        padding: 3%;
-        max-width: 70%;
+        margin: 0;
+        background: #0a0e1a;
+        color: #f1f5f9;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        padding: 3rem 1.25rem;
     }
-    .form-group {
-        padding-bottom: 20px;
+    .wrap {
+        max-width: 720px;
+        margin: 0 auto;
+        background: #111827;
+        border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 16px;
+        padding: 2.5rem;
+        box-shadow: 0 20px 40px rgba(0,0,0,0.3);
     }
-    .form-group .control-label {
-        display: block;
-        font-family: "Raleway", sans-serif;
-        font-weight: bold;
-        padding-bottom: 5px;
-    }   
-    .form-group input {
-        min-height: 40px;
-        min-width: 100%; 
-        padding-left: 10px;      
-        padding-right: 10px;      
-    }   
-     #submit {
-        padding: 20px 50px 20px 50px;
-        background: #21b799;
-        color: white;
+    h1 { margin: 0 0 0.5rem; font-size: 1.75rem; letter-spacing: -0.02em; }
+    h2 { margin: 1.5rem 0 0.75rem; font-size: 1.125rem; color: #94a3b8; font-weight: 600; }
+    p { color: #94a3b8; margin: 0 0 1.5rem; line-height: 1.55; }
+    .check-grid { display: grid; gap: 0.5rem; margin: 1.5rem 0; }
+    .check-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 0.75rem 1rem;
+        background: #1f2937;
+        border-radius: 8px;
+        font-size: 0.9375rem;
+    }
+    .ok { color: #10b981; font-weight: 600; }
+    .warn { color: #f59e0b; font-weight: 600; }
+    .err { color: #ef4444; font-weight: 600; }
+    .form-row { margin-bottom: 1rem; }
+    label { display: block; font-size: 0.875rem; font-weight: 500; margin-bottom: 0.375rem; color: #cbd5e1; }
+    input[type="text"], input[type="password"], input[type="email"] {
+        width: 100%;
+        background: #1f2937;
+        color: #f1f5f9;
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 6px;
+        padding: 0.625rem 0.875rem;
+        font-size: 0.9375rem;
+        font-family: inherit;
+    }
+    input:focus { outline: none; border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,0.15); }
+    button {
+        background: #38bdf8;
+        color: #0a0e1a;
         border: none;
-        outline: none;
-        font-family: "Raleway", sans-serif;
-        font-weight: bold;
-        margin-top: 15px;
+        border-radius: 6px;
+        padding: 0.75rem 1.5rem;
+        font-weight: 600;
+        font-size: 0.9375rem;
         cursor: pointer;
-     }    
-     #requirements {
-        padding-bottom: 15px;   
-        font-family: "Raleway", sans-serif;  
-     }
-     .alert {
-        padding: 30px;
-        font-family: "Raleway", sans-serif;
-        color: white;
-        background: #21b799;
-     }
-    </style>';
-
-}
-
-function fetch_content($url) {
-
-    $ch = curl_init();
-    $timeout = 5;
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $timeout);
-    $data = curl_exec($ch);
-    curl_close($ch);
-    return $data;
-
-}
-
-function vomitFooter() {
-    echo '</body>
-    </html>';
-}
-
-function generatePasswordHash($input) {
-
-    for ($x = 0; $x < 100; $x++) {
-
-        $input = hash('sha256', $input);
-
+        margin-top: 0.5rem;
     }
+    button:hover { background: #0ea5e9; }
+    .alert {
+        padding: 0.875rem 1.125rem;
+        border-radius: 8px;
+        font-size: 0.9375rem;
+        margin-bottom: 1.5rem;
+    }
+    .alert-success { background: rgba(16,185,129,0.12); color: #10b981; border: 1px solid rgba(16,185,129,0.3); }
+    .alert-danger  { background: rgba(239,68,68,0.12);  color: #ef4444; border: 1px solid rgba(239,68,68,0.3); }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    @media (max-width: 540px) { .grid-2 { grid-template-columns: 1fr; } }
+    code { background: #1f2937; padding: 0.125rem 0.375rem; border-radius: 4px; font-size: 0.875rem; }
+</style>
+</head>
+<body>
+<div class="wrap">';
+}
 
-    return hash('sha512', $input);
+function installer_footer()
+{
+    echo '</div></body></html>';
+}
 
+/**
+ * Modern password hashing for admin accounts. The framework's
+ * App::adminPasswordVerify() understands these hashes.
+ */
+function installer_password_hash($input)
+{
+    return password_hash($input, PASSWORD_DEFAULT, ['cost' => 12]);
 }

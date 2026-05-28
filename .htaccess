@@ -1,0 +1,39 @@
+# Solnew - URL rewriting and security headers
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Send all requests through index.php as ?param=...
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^(.*)$ index.php?param=$1 [QSA,L]
+</IfModule>
+
+# Block access to sensitive directories.
+RedirectMatch 403 ^/config/config\.php$
+RedirectMatch 403 ^/storage/.*$
+RedirectMatch 403 ^/lib/.*\.php$
+RedirectMatch 403 ^/models/.*$
+
+# Disable directory listings.
+Options -Indexes
+
+# Security headers.
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set Permissions-Policy "geolocation=(), microphone=(), camera=()"
+</IfModule>
+
+# Cache static assets aggressively.
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType text/css "access plus 30 days"
+    ExpiresByType application/javascript "access plus 30 days"
+    ExpiresByType image/png "access plus 90 days"
+    ExpiresByType image/jpeg "access plus 90 days"
+    ExpiresByType image/svg+xml "access plus 90 days"
+    ExpiresByType image/x-icon "access plus 365 days"
+    ExpiresByType font/woff2 "access plus 365 days"
+</IfModule>
