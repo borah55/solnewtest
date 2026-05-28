@@ -1,705 +1,481 @@
 <?php
-
 /**
- * Fernico - Ridiculously lite PHP framework
+ * Admin controller.
  *
- * @author Areeb Majeed, Volcrado Holdings
- * @package Fernico
- * @copyright 2017 - Volcrado Holdings Limited
- * @license https://opensource.org/licenses/MIT MIT License
- * @link https://volcrado.com/
+ * Bug fixes vs. the original:
+ *   - All raw `WHERE user_name = '{$x}'` style queries replaced with
+ *     prepared statements; previously trivially exploitable from any
+ *     compromised admin session.
+ *   - Admin password storage migrated to password_hash() / verify().
+ *   - Settings page coin_information value is parsed safely (the prior
+ *     code would happily INSERT random user input as DB values).
+ *   - X-XSS-Protection header removed (officially deprecated).
  *
+ * @package Solnew
  */
 
 if (!defined('FERNICO')) {
-    fernico_destroy();
+    http_response_code(403);
+    exit('Forbidden');
 }
 
-class adminController extends AstridController {
+class adminController extends AstridController
+{
+    /** @var Authentication */
+    public $auth;
 
-    public function __construct() {
-        require_once(FERNICO_PATH . "/models/Bootstrapper.php");
+    public function __construct()
+    {
+        require_once FERNICO_PATH . '/models/Bootstrapper.php';
         parent::__construct();
         $this->auth = new Authentication();
     }
 
-    public function home() {
+    /**
+     * CSRF guard for admin POSTs. Returns the error string when the
+     * token is missing/invalid, null otherwise.
+     */
+    private function requireCsrf()
+    {
+        if (!Request::isPost()) {
+            return null;
+        }
+        $token = Request::POST('csrf_token');
+        if (!$token || !fernico_verifyAntiCSRFToken($token)) {
+            return 'Session expired. Please reload the page and try again.';
+        }
+        return null;
+    }
 
+    /**
+     * Fetch a single user by id, email, or username.
+     *
+     * @param string $needle  The identifier supplied by the admin.
+     * @param string $columns SQL projection (must NOT include user input).
+     *
+     * @return array|null Associative row or null if no match.
+     */
+    private function findUser($needle, $columns)
+    {
         global $fernico_db;
+        $needle = trim((string) $needle);
+        if ($needle === '') {
+            return null;
+        }
 
+        if (ctype_digit($needle)) {
+            $where = 'user_id = ?';
+            $type = 'i';
+            $value = (int) $needle;
+        } elseif (filter_var($needle, FILTER_VALIDATE_EMAIL)) {
+            $where = 'user_email = ?';
+            $type = 's';
+            $value = $needle;
+        } else {
+            $where = 'user_name = ?';
+            $type = 's';
+            $value = $needle;
+        }
+
+        $sql = "SELECT {$columns} FROM users WHERE {$where} LIMIT 1";
+        $stmt = $fernico_db->prepare($sql);
+        $stmt->bind_param($type, $value);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return $row;
+    }
+
+    public function home()
+    {
+        global $fernico_db;
         App::setAdminRedirections();
 
-        $opt = array(
-            'pageName' => 'Admin Dashboard'
-        );
+        $opt = ['pageName' => 'Admin Dashboard'];
 
-
+        // ---- update user --------------------------------------------------
         if (Request::POST('update_user')) {
+            $err = $this->requireCsrf();
+            if ($err) {
+                $opt['responseMessage'] = $err;
+            } else {
+                $userId         = (int)    Request::POST('user_id', true);
+                $userName       = (string) Request::POST('user_name', true);
+                $userEmail      = (string) Request::POST('user_email', true);
+                $userVerified   = (int)    Request::POST('user_verified', true);
+                $claimsMade     = (int)    Request::POST('claims_made', true);
+                $referredIncome = (float)  Request::POST('referred_income', true);
+                $referralIncome = (float)  Request::POST('referral_income', true);
+                $referral       = (int)    Request::POST('referral', true);
+                $address        = (string) Request::POST('address', true);
 
-            $user_id = Request::POST('user_id', true);
-            $user_name = Request::POST('user_name', true);
-            $user_email = Request::POST('user_email', true);
-            $user_verified = Request::POST('user_verified', true);
-            $claims_made = Request::POST('claims_made', true);
-            $referred_income = Request::POST('referred_income', true);
-            $referral_income = Request::POST('referral_income', true);
-            $referral = Request::POST('referral', true);
-            $address = Request::POST('address', true);
-
-            $stmt = $fernico_db->stmt_init();
-            $stmt->prepare("UPDATE users SET user_name = ?, user_email = ?, user_verified = ?, claims_made = ?, referred_income = ?, referral_income = ?, referral = ?, address = ? WHERE user_id = ?");
-            $stmt->bind_param("ssiiddisi", $user_name, $user_email, $user_verified, $claims_made, $referred_income, $referral_income, $referral, $address, $user_id);
-            $stmt->execute();
-            $stmt->close();
-
-            $opt['responseMessage'] = "The changes have been applied to the user account.";
-
+                $stmt = $fernico_db->prepare(
+                    'UPDATE users SET user_name = ?, user_email = ?,
+                            user_verified = ?, claims_made = ?,
+                            referred_income = ?, referral_income = ?,
+                            referral = ?, address = ?
+                      WHERE user_id = ?'
+                );
+                $stmt->bind_param(
+                    'ssiiddisi',
+                    $userName, $userEmail, $userVerified, $claimsMade,
+                    $referredIncome, $referralIncome, $referral, $address, $userId
+                );
+                $stmt->execute();
+                $stmt->close();
+                $opt['responseMessage'] = 'Changes applied to the user account.';
+            }
         }
 
-        if (Request::POST('edit_user')) {
-
-            $user = Request::POST('user', true);
-
-            if (is_numeric($user)) {
-
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_id, user_name, user_email, user_verified, claims_made, referred_income, referral_income, referral, address FROM users WHERE user_id = ?");
-                $stmt->bind_param("i", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
-            } elseif (filter_var($user, FILTER_VALIDATE_EMAIL)) {
-
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_id, user_name, user_email, user_verified, claims_made, referred_income, referral_income, referral, address FROM users WHERE user_email = ?");
-                $stmt->bind_param("s", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
-            } else {
-
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_id, user_name, user_email, user_verified, claims_made, referred_income, referral_income, referral, address FROM users WHERE user_name = ?");
-                $stmt->bind_param("s", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
-            }
-
-            if ($user['count'] > 0.99) {
-
+        // ---- edit user (GET or POST) -------------------------------------
+        $editTarget = Request::POST('edit_user') ? Request::POST('user', true) : Request::GET('edit_user', true);
+        if ($editTarget) {
+            $row = $this->findUser($editTarget,
+                'COUNT(user_id) AS count, user_id, user_name, user_email,
+                 user_verified, claims_made, referred_income,
+                 referral_income, referral, address'
+            );
+            if ($row && (int) $row['count'] > 0) {
                 $opt['showEditSection'] = true;
-                $opt['editData'] = $user;
-
+                $opt['editData'] = $row;
             } else {
-
-                $opt['responseMessage'] = "The user does not exist.";
-
+                $opt['responseMessage'] = 'The user does not exist.';
             }
-
         }
 
-        if (Request::GET('edit_user')) {
-
-            $user = Request::GET('edit_user', true);
-
-            if (is_numeric($user)) {
-
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_id, user_name, user_email, user_verified, claims_made, referred_income, referral_income, referral, address FROM users WHERE user_id = ?");
-                $stmt->bind_param("i", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
-            } elseif (filter_var($user, FILTER_VALIDATE_EMAIL)) {
-
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_id, user_name, user_email, user_verified, claims_made, referred_income, referral_income, referral, address FROM users WHERE user_email = ?");
-                $stmt->bind_param("s", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
+        // ---- delete user (GET or POST) -----------------------------------
+        $deleteTarget = Request::POST('delete_user') ? Request::POST('user', true) : Request::GET('delete_user', true);
+        if ($deleteTarget) {
+            $err = Request::isPost() ? $this->requireCsrf() : null;
+            if ($err) {
+                $opt['responseMessage'] = $err;
             } else {
-
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_id, user_name, user_email, user_verified, claims_made, referred_income, referral_income, referral, address FROM users WHERE user_name = ?");
-                $stmt->bind_param("s", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
-            }
-
-            if ($user['count'] > 0.99) {
-
-                $opt['showEditSection'] = true;
-                $opt['editData'] = $user;
-
-            } else {
-
-                $opt['responseMessage'] = "The user does not exist.";
-
-            }
-
-        }
-
-
-        if (Request::GET('delete_user')) {
-
-            $user = Request::GET('delete_user', true);
-
-            if (is_numeric($user)) {
-
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_name FROM users WHERE user_id = ?");
-                $stmt->bind_param("i", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
-            } elseif (filter_var($user, FILTER_VALIDATE_EMAIL)) {
-
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_name FROM users WHERE user_email = ?");
-                $stmt->bind_param("s", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
-            } else {
-
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_name FROM users WHERE user_name = ?");
-                $stmt->bind_param("s", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
-            }
-
-            if ($user['count'] > 0.99) {
-
-                $fernico_db->query("DELETE FROM users WHERE user_name = '{$user['user_name']}'");
-
-                $opt['responseMessage'] = "The user with username <b>" . $user['user_name'] . "</b> has been successfully deleted.";
-
-            } else {
-
-                $opt['responseMessage'] = "The user does not exist.";
-
-            }
-
-        }
-
-        if (Request::POST('delete_user')) {
-
-            $user = Request::POST('user', true);
-
-            if (is_numeric($user)) {
-
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_name FROM users WHERE user_id = ?");
-                $stmt->bind_param("i", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
-            } elseif (filter_var($user, FILTER_VALIDATE_EMAIL)) {
-
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_name FROM users WHERE user_email = ?");
-                $stmt->bind_param("s", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
-            } else {
-
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_name FROM users WHERE user_name = ?");
-                $stmt->bind_param("s", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
-            }
-
-            if ($user['count'] > 0.99) {
-
-                $fernico_db->query("DELETE FROM users WHERE user_name = '{$user['user_name']}'");
-
-                $opt['responseMessage'] = "The user with username <b>" . $user['user_name'] . "</b> has been successfully deleted.";
-
-            } else {
-
-                $opt['responseMessage'] = "The user does not exist.";
-
-            }
-
-        }
-
-        if (Request::GET('ban_unban_user')) {
-
-            $user = Request::GET('ban_unban_user', true);
-
-            if (is_numeric($user)) {
-
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_name, account_status FROM users WHERE user_id = ?");
-                $stmt->bind_param("i", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
-            } elseif (filter_var($user, FILTER_VALIDATE_EMAIL)) {
-
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_name, account_status FROM users WHERE user_email = ?");
-                $stmt->bind_param("s", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
-            } else {
-
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_name, account_status FROM users WHERE user_name = ?");
-                $stmt->bind_param("s", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
-            }
-
-            if ($user['count'] > 0.99) {
-
-                if ($user['account_status'] == 1) {
-
-                    $fernico_db->query("UPDATE users SET account_status = 0 WHERE user_name = '{$user['user_name']}'");
-                    $opt['responseMessage'] = "The user with username <b>" . $user['user_name'] . "</b> has been successfully banned.";
-
+                $row = $this->findUser($deleteTarget, 'COUNT(user_id) AS count, user_id, user_name');
+                if ($row && (int) $row['count'] > 0) {
+                    $stmt = $fernico_db->prepare('DELETE FROM users WHERE user_id = ?');
+                    $userId = (int) $row['user_id'];
+                    $stmt->bind_param('i', $userId);
+                    $stmt->execute();
+                    $stmt->close();
+                    $opt['responseMessage'] =
+                        'User <b>' . htmlspecialchars($row['user_name'], ENT_QUOTES) . '</b> has been deleted.';
                 } else {
-
-                    $fernico_db->query("UPDATE users SET account_status = 1 WHERE user_name = '{$user['user_name']}'");
-                    $opt['responseMessage'] = "The user with username <b>" . $user['user_name'] . "</b> has been successfully unbanned.";
-
+                    $opt['responseMessage'] = 'The user does not exist.';
                 }
-
-            } else {
-
-                $opt['responseMessage'] = "The user does not exist.";
-
             }
-
         }
 
-        if (Request::POST('ban_unban_user')) {
-
-            $user = Request::POST('user', true);
-
-            if (is_numeric($user)) {
-
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_name, account_status FROM users WHERE user_id = ?");
-                $stmt->bind_param("i", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
-            } elseif (filter_var($user, FILTER_VALIDATE_EMAIL)) {
-
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_name, account_status FROM users WHERE user_email = ?");
-                $stmt->bind_param("s", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
+        // ---- ban / unban (GET or POST) -----------------------------------
+        $banTarget = Request::POST('ban_unban_user') ? Request::POST('user', true) : Request::GET('ban_unban_user', true);
+        if ($banTarget) {
+            $err = Request::isPost() ? $this->requireCsrf() : null;
+            if ($err) {
+                $opt['responseMessage'] = $err;
             } else {
+                $row = $this->findUser($banTarget,
+                    'COUNT(user_id) AS count, user_id, user_name, account_status'
+                );
+                if ($row && (int) $row['count'] > 0) {
+                    $newStatus = (int) $row['account_status'] === 1 ? 0 : 1;
+                    $stmt = $fernico_db->prepare(
+                        'UPDATE users SET account_status = ? WHERE user_id = ?'
+                    );
+                    $userId = (int) $row['user_id'];
+                    $stmt->bind_param('ii', $newStatus, $userId);
+                    $stmt->execute();
+                    $stmt->close();
 
-                $stmt = $fernico_db->stmt_init();
-                $stmt->prepare("SELECT COUNT(user_id) as count, user_name, account_status FROM users WHERE user_name = ?");
-                $stmt->bind_param("s", $user);
-                $stmt->execute();
-                $data = $stmt->get_result();
-                $stmt->close();
-                $user = $data->fetch_assoc();
-
-            }
-
-            if ($user['count'] > 0.99) {
-
-                if ($user['account_status'] == 1) {
-
-                    $fernico_db->query("UPDATE users SET account_status = 0 WHERE user_name = '{$user['user_name']}'");
-                    $opt['responseMessage'] = "The user with username <b>" . $user['user_name'] . "</b> has been successfully banned.";
-
+                    $verb = $newStatus === 0 ? 'banned' : 'unbanned';
+                    $opt['responseMessage'] =
+                        'User <b>' . htmlspecialchars($row['user_name'], ENT_QUOTES) . '</b> has been ' . $verb . '.';
                 } else {
-
-                    $fernico_db->query("UPDATE users SET account_status = 1 WHERE user_name = '{$user['user_name']}'");
-                    $opt['responseMessage'] = "The user with username <b>" . $user['user_name'] . "</b> has been successfully unbanned.";
-
+                    $opt['responseMessage'] = 'The user does not exist.';
                 }
-
-            } else {
-
-                $opt['responseMessage'] = "The user does not exist.";
-
             }
-
         }
 
         $this->renderTemplate('Admin/Home.tpl', $opt);
-
     }
 
-    public function banned__users() {
+    public function banned__users()
+    {
+        $this->listUsers(true, 'Admin/Banned-Users.tpl', 'Banned Users');
+    }
 
+    public function users()
+    {
+        $this->listUsers(false, 'Admin/Users.tpl', 'Users');
+    }
+
+    /**
+     * Shared paginated list for /admin/users and /admin/banned-users.
+     */
+    private function listUsers($bannedOnly, $template, $pageName)
+    {
         global $fernico_db;
-
         App::setAdminRedirections();
 
-        $opt = array(
-            'pageName' => 'Banned Users'
-        );
-
-        $data = array();
-
-        $numrows = ($fernico_db->query("SELECT COUNT(user_id) as id FROM users WHERE account_status = 0 ORDER BY user_id DESC"))->fetch_assoc();
-
+        $where = $bannedOnly ? 'WHERE account_status = 0' : '';
         $records = 200;
-        $total_pages = ceil($numrows['id'] / $records);
 
-        if (isset($_GET['offset']) && is_numeric(Request::GET('offset', true))) {
-            $req_page = (int)Request::GET('offset', true);
-        } else {
-            $req_page = 1;
+        $count = $fernico_db->query("SELECT COUNT(user_id) AS id FROM users {$where}")->fetch_assoc();
+        $totalRows = (int) $count['id'];
+        $totalPages = max(1, (int) ceil($totalRows / $records));
+
+        $reqPage = (int) Request::GET('offset', true);
+        if ($reqPage < 1) {
+            $reqPage = 1;
         }
-
-        if ($req_page > $total_pages) {
-            $req_page = $total_pages;
+        if ($reqPage > $totalPages) {
+            $reqPage = $totalPages;
         }
+        $offset = ($reqPage - 1) * $records;
 
-        if ($req_page < 1) {
-            $req_page = 1;
+        $cols = $bannedOnly
+            ? 'user_id, user_name, user_email, registration_datetime, registration_ip'
+            : 'user_id, user_name, user_email, registration_datetime, registration_ip, account_status';
+
+        $sql = "SELECT {$cols} FROM users {$where} ORDER BY user_id DESC LIMIT ? OFFSET ?";
+        $stmt = $fernico_db->prepare($sql);
+        $stmt->bind_param('ii', $records, $offset);
+        $stmt->execute();
+        $rows = $stmt->get_result();
+
+        $data = [];
+        while ($r = $rows->fetch_assoc()) {
+            $data[] = $r;
         }
+        $stmt->close();
 
-        $offset = ($req_page - 1) * $records;
-
-        $qry = $fernico_db->query("SELECT user_id,user_name,user_email,registration_datetime,registration_ip FROM users WHERE account_status = 0 ORDER BY user_id DESC LIMIT $offset, $records");
-        $key = 0;
-
-        while ($r = $qry->fetch_assoc()) {
-
-            $data[$key]['user_id'] = $r['user_id'];
-            $data[$key]['user_name'] = $r['user_name'];
-            $data[$key]['user_email'] = $r['user_email'];
-            $data[$key]['registration_datetime'] = $r['registration_datetime'];
-            $data[$key]['registration_ip'] = $r['registration_ip'];
-            $key++;
-
-        }
-
-        $opt['items'] = $data;
-        $opt['req_page'] = $req_page;
-        $opt['total_pages'] = $total_pages;
-
-        $this->renderTemplate('Admin/Banned-Users.tpl', $opt);
-
+        $this->renderTemplate($template, [
+            'pageName'    => $pageName,
+            'items'       => $data,
+            'req_page'    => $reqPage,
+            'total_pages' => $totalPages,
+        ]);
     }
 
-
-    public function users() {
-
+    public function ads()
+    {
         global $fernico_db;
-
         App::setAdminRedirections();
 
-        $opt = array(
-            'pageName' => 'Users'
-        );
-
-        $data = array();
-
-        $numrows = ($fernico_db->query("SELECT COUNT(user_id) as id FROM users ORDER BY user_id DESC"))->fetch_assoc();
-
-        $records = 200;
-        $total_pages = ceil($numrows['id'] / $records);
-
-        if (isset($_GET['offset']) && is_numeric(Request::GET('offset', true))) {
-            $req_page = (int)Request::GET('offset', true);
-        } else {
-            $req_page = 1;
-        }
-
-        if ($req_page > $total_pages) {
-            $req_page = $total_pages;
-        }
-
-        if ($req_page < 1) {
-            $req_page = 1;
-        }
-
-        $offset = ($req_page - 1) * $records;
-
-        $qry = $fernico_db->query("SELECT user_id,user_name,user_email,registration_datetime,registration_ip,account_status FROM users ORDER BY user_id DESC LIMIT $offset, $records");
-        $key = 0;
-
-        while ($r = $qry->fetch_assoc()) {
-
-            $data[$key]['user_id'] = $r['user_id'];
-            $data[$key]['user_name'] = $r['user_name'];
-            $data[$key]['user_email'] = $r['user_email'];
-            $data[$key]['registration_datetime'] = $r['registration_datetime'];
-            $data[$key]['registration_ip'] = $r['registration_ip'];
-            $data[$key]['account_status'] = $r['account_status'];
-            $key++;
-
-        }
-
-        $opt['items'] = $data;
-        $opt['req_page'] = $req_page;
-        $opt['total_pages'] = $total_pages;
-
-        $this->renderTemplate('Admin/Users.tpl', $opt);
-
-    }
-
-    public function ads() {
-
-        header('X-XSS-Protection:0');
-
-        global $fernico_db;
-
-        App::setAdminRedirections();
-
-        $opt = array(
-            'pageName' => 'Ads'
-        );
+        $opt = ['pageName' => 'Ads'];
 
         if (Request::POST('submit')) {
-
-            $size = (int)$fernico_db->real_escape_string(Request::POST('size'));
-            $code = $fernico_db->real_escape_string(Request::POST('code'));
-            $fernico_db->query("INSERT INTO ads (type,code) VALUES ({$size}, '{$code}')");
-
-            $opt['responseMessage'] = "Added to database";
-
+            $err = $this->requireCsrf();
+            if ($err) {
+                $opt['responseMessage'] = $err;
+            } else {
+                $size = (int) Request::POST('size');
+                $code = (string) Request::POST('code');
+                $stmt = $fernico_db->prepare('INSERT INTO ads (type, code) VALUES (?, ?)');
+                $stmt->bind_param('is', $size, $code);
+                $stmt->execute();
+                $stmt->close();
+                $opt['responseMessage'] = 'Ad added.';
+            }
         }
 
         if (Request::GET('d')) {
-
-            $id = (int)$fernico_db->real_escape_string(Request::GET('d'));
-            $fernico_db->query("DELETE FROM ads WHERE id = {$id}");
-            $opt['responseMessage'] = "Deleted from database";
-
+            $id = (int) Request::GET('d');
+            $stmt = $fernico_db->prepare('DELETE FROM ads WHERE id = ?');
+            $stmt->bind_param('i', $id);
+            $stmt->execute();
+            $stmt->close();
+            $opt['responseMessage'] = 'Ad deleted.';
         }
 
-        $opt['items'] = $fernico_db->query("SELECT * FROM ads");
-
+        $opt['items'] = $fernico_db->query('SELECT * FROM ads ORDER BY id DESC');
         $this->renderTemplate('Admin/Ads.tpl', $opt);
-
     }
 
-    public function profile() {
-
+    public function profile()
+    {
         global $fernico_db;
-
         App::setAdminRedirections();
 
-        $opt = array();
-        $opt['pageName'] = "Admin Profile";
+        $opt = ['pageName' => 'Admin Profile'];
 
-        if (isset($_POST['update_user_name']) && App::isAdmin() == true) {
-
-            $user_name = Request::POST('new_user_name', true);
-
-            if (strlen($user_name) < 3) {
-
-                $opt['responseMessage'] = "The Username needs to be 3 characters at minimum.";
-
-            } elseif (strlen($user_name) > 16) {
-
-                $opt['responseMessage'] = "The Username needs to be 16 characters at maximum.";
-
-            } elseif (preg_match('/[\'^£$%&*()}{@#~?><>,|=_+¬-]/', $user_name)) {
-
-                $opt['responseMessage'] = "The Username may not contain any special character.";
-
+        if (Request::POST('update_user_name') && App::isAdmin()) {
+            $err = $this->requireCsrf();
+            if ($err) {
+                $opt['responseMessage'] = $err;
             } else {
-
-                $fernico_db->query("UPDATE admin_details SET user_name = '{$user_name}' WHERE user_name = '{$_SESSION['admin_user_name']}'");
-                App::destroyAdminSession();
-                $opt['responseMessage'] = "Your username has been changed. Please login with your new username now.";
-
+                $userName = (string) Request::POST('new_user_name', true);
+                if (strlen($userName) < 3) {
+                    $opt['responseMessage'] = 'The username needs to be at least 3 characters.';
+                } elseif (strlen($userName) > 16) {
+                    $opt['responseMessage'] = 'The username must be 16 characters or less.';
+                } elseif (preg_match('/[\'^£$%&*()}{@#~?><>,|=_+¬-]/', $userName)) {
+                    $opt['responseMessage'] = 'The username may not contain special characters.';
+                } else {
+                    $stmt = $fernico_db->prepare(
+                        'UPDATE admin_details SET user_name = ? WHERE user_name = ?'
+                    );
+                    $stmt->bind_param('ss', $userName, $_SESSION['admin_user_name']);
+                    $stmt->execute();
+                    $stmt->close();
+                    App::destroyAdminSession();
+                    $opt['responseMessage'] = 'Username changed. Please log in again.';
+                }
             }
-
         }
 
-        if (isset($_POST['update_password']) && App::isAdmin() == true) {
-
-            $current_password = Request::POST('current_password', true);
-            $new_password = Request::POST('new_password', true);
-
-            $s = $fernico_db->query("SELECT password FROM admin_details WHERE user_name = '{$_SESSION['admin_user_name']}'");
-            $s = $s->fetch_assoc();
-
-            $hash = $s['password'];
-            $hash_generated = App::generatePasswordHash($current_password);
-
-            if (strlen($new_password) < 6) {
-
-                $opt['responseMessage'] = "The Password you entered is too short, it needs to be 6 characters at minimum.";
-
-            } elseif (strlen($new_password) > 64) {
-
-                $opt['responseMessage'] = "The Password you entered is too long, it needs to be 64 characters at maximum.";
-
-            } elseif ($hash != $hash_generated) {
-
-                $opt['responseMessage'] = "The Current Password you entered does not match the one on your profile.";
-
+        if (Request::POST('update_password') && App::isAdmin()) {
+            $err = $this->requireCsrf();
+            if ($err) {
+                $opt['responseMessage'] = $err;
             } else {
+                $current = (string) Request::POST('current_password');
+                $new = (string) Request::POST('new_password');
 
-                $new_hash = App::generatePasswordHash($new_password);
+                $stmt = $fernico_db->prepare(
+                    'SELECT password FROM admin_details WHERE user_name = ? LIMIT 1'
+                );
+                $stmt->bind_param('s', $_SESSION['admin_user_name']);
+                $stmt->execute();
+                $row = $stmt->get_result()->fetch_assoc();
+                $stmt->close();
 
-                $fernico_db->query("UPDATE admin_details SET password = '{$new_hash}' WHERE user_name = '{$_SESSION['admin_user_name']}'");
-                App::destroyAdminSession();
-                $opt['responseMessage'] = "Your password has been changed. Please login with your new password now.";
-
+                if (strlen($new) < 6) {
+                    $opt['responseMessage'] = 'New password must be at least 6 characters.';
+                } elseif (strlen($new) > 64) {
+                    $opt['responseMessage'] = 'New password may not exceed 64 characters.';
+                } elseif (!$row || !App::adminPasswordVerify($current, $row['password'])) {
+                    $opt['responseMessage'] = 'Current password does not match.';
+                } else {
+                    $newHash = App::adminPasswordHash($new);
+                    $stmt = $fernico_db->prepare(
+                        'UPDATE admin_details SET password = ? WHERE user_name = ?'
+                    );
+                    $stmt->bind_param('ss', $newHash, $_SESSION['admin_user_name']);
+                    $stmt->execute();
+                    $stmt->close();
+                    App::destroyAdminSession();
+                    $opt['responseMessage'] = 'Password changed. Please log in again.';
+                }
             }
-
         }
 
         $this->renderTemplate('Admin/Profile.tpl', $opt);
-
     }
 
-    public function login() {
-
+    public function login()
+    {
         global $fernico_db;
+        $opt = ['pageName' => 'Administrator Login'];
 
-        $opt = array(
-            'pageName' => "Administrator Login"
-        );
-
-        if (isset($_POST['login']) && App::isAdmin() == false) {
-
-            $user_name = Request::POST('user_name');
-            $password = Request::POST('password');
-            $password_hash = App::generatePasswordHash($password);
-
-            $stmt = $fernico_db->stmt_init();
-            $stmt->prepare("SELECT COUNT(id) as count, id FROM admin_details WHERE user_name = ? AND password = ?");
-            $stmt->bind_param("ss", $user_name, $password_hash);
-            $stmt->execute();
-            $data = $stmt->get_result();
-            $stmt->close();
-            $user = $data->fetch_assoc();
-
-            if ($user['count'] > 0.99) {
-
-                $token = bin2hex(openssl_random_pseudo_bytes(64));
-                $sessionTime = 60 * 60 * 24 * Config::fetch('SESSION_DAYS');
-
-                $fernico_db->query("UPDATE admin_details SET token = '{$token}' WHERE id = {$user['id']}");
-                $_SESSION['admin_user_name'] = $user_name;
-
-                setcookie('admin_token', $token, time() + $sessionTime, "/", Config::fetch('COOKIE_DOMAIN'));
-                header("Location: " . fernico_getAbsURL() . "admin/home");
-                fernico_destroy();
-
+        if (Request::POST('login') && !App::isAdmin()) {
+            $err = $this->requireCsrf();
+            if ($err) {
+                $opt['responseMessage'] = $err;
             } else {
+                $userName = (string) Request::POST('user_name');
+                $password = (string) Request::POST('password');
 
-                $opt['responseMessage'] = "The login details you've used are not valid.";
+                $stmt = $fernico_db->prepare(
+                    'SELECT id, password FROM admin_details WHERE user_name = ? LIMIT 1'
+                );
+                $stmt->bind_param('s', $userName);
+                $stmt->execute();
+                $row = $stmt->get_result()->fetch_assoc();
+                $stmt->close();
 
+                if ($row && App::adminPasswordVerify($password, $row['password'])) {
+                    $token = bin2hex(random_bytes(32));
+                    $sessionTime = 60 * 60 * 24 * (int) Config::fetch('SESSION_DAYS');
+
+                    $stmt = $fernico_db->prepare(
+                        'UPDATE admin_details SET token = ? WHERE id = ?'
+                    );
+                    $stmt->bind_param('si', $token, $row['id']);
+                    $stmt->execute();
+                    $stmt->close();
+
+                    $_SESSION['admin_user_name'] = $userName;
+                    setcookie(
+                        'admin_token',
+                        $token,
+                        time() + $sessionTime,
+                        '/',
+                        (string) Config::fetch('COOKIE_DOMAIN'),
+                        (bool) Config::fetch('SECURE'),
+                        true
+                    );
+
+                    header('Location: ' . fernico_getAbsURL() . 'admin/home');
+                    fernico_destroy();
+                }
+                $opt['responseMessage'] = 'Invalid login credentials.';
             }
-
         }
 
-        if (App::isAdmin() == true) {
-            header("Location: " . fernico_getAbsURL() . "admin/home");
+        if (App::isAdmin()) {
+            header('Location: ' . fernico_getAbsURL() . 'admin/home');
             fernico_destroy();
         }
 
         $this->renderTemplate('Admin/Login.tpl', $opt);
-
     }
 
-    public function settings() {
-
+    public function settings()
+    {
         global $fernico_db;
-
         App::setAdminRedirections();
 
-        $opt = array(
-            'pageName' => 'Settings'
-        );
+        $opt = ['pageName' => 'Settings'];
 
         if (Request::POST('update')) {
+            $err = $this->requireCsrf();
+            if ($err) {
+                $opt['responseMessage'] = $err;
+            } else {
+                $stmt = $fernico_db->prepare(
+                    'UPDATE config SET value = ? WHERE parameter = ?'
+                );
+                foreach ($_POST as $key => $value) {
+                    if ($key === 'csrf_token' || $key === 'update') {
+                        continue;
+                    }
+                    if ($key === 'coin_information') {
+                        $units = explode('-', (string) $value, 2);
+                        if (count($units) === 2) {
+                            $abbrev = $units[0];
+                            $name = $units[1];
 
-            foreach ($_POST as $key => $value) {
+                            $a = 'coin_abbreviation';
+                            $stmt->bind_param('ss', $abbrev, $a);
+                            $stmt->execute();
 
-                if ($key == 'coin_information') {
-
-                    $units = explode("-", $value);
-                    $coin_abbrev = $units[0];
-                    $coin_name = $units[1];
-
-                    $fernico_db->query("UPDATE config SET value = '{$coin_abbrev}' WHERE parameter = 'coin_abbreviation'");
-                    $fernico_db->query("UPDATE config SET value = '{$coin_name}' WHERE parameter = 'coin_name'");
-
-                } else {
-
-                    $stmt = $fernico_db->stmt_init();
-                    $stmt->prepare("UPDATE config SET value = ? WHERE parameter = ?");
-                    $stmt->bind_param("ss", $value, $key);
+                            $b = 'coin_name';
+                            $stmt->bind_param('ss', $name, $b);
+                            $stmt->execute();
+                        }
+                        continue;
+                    }
+                    $stringValue = is_array($value) ? json_encode($value) : (string) $value;
+                    $stmt->bind_param('ss', $stringValue, $key);
                     $stmt->execute();
-                    $stmt->close();
-
                 }
-
+                $stmt->close();
+                $opt['responseMessage'] = 'Settings updated.';
             }
-
-            $opt['responseMessage'] = "The settings have been updated successfully.";
-
         }
 
-        $contents = json_decode(fernico_post('https://faucetpay.io/page/currs'), true);
-        $opt['coins'] = $contents['currencies_names'];
+        $contents = json_decode((string) fernico_post('https://faucetpay.io/page/currs'), true);
+        $opt['coins'] = is_array($contents) && isset($contents['currencies_names'])
+            ? $contents['currencies_names']
+            : [];
 
         $this->renderTemplate('Admin/Settings.tpl', $opt);
-
     }
 
-    public function logout() {
-
+    public function logout()
+    {
         App::setAdminRedirections();
         App::destroyAdminSession();
-        header("Location: " . fernico_getAbsURL() . 'admin/login');
-
+        header('Location: ' . fernico_getAbsURL() . 'admin/login');
+        fernico_destroy();
     }
-
 }

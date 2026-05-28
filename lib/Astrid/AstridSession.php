@@ -1,47 +1,66 @@
 <?php
-
 /**
- * Fernico - Ridiculously lite PHP framework
+ * Session bootstrapper used as the base for AstridController.
  *
- * @author Areeb Majeed, Volcrado Holdings
+ * Modern, PHP 7.1+ compatible session settings. The previous version
+ * relied on `session.entropy_*` and `session.hash_*` ini values which
+ * were removed in PHP 7.1 and silently break newer installs.
+ *
  * @package Fernico
- * @copyright 2017 - Volcrado Holdings Limited
- * @license https://opensource.org/licenses/MIT MIT License
- * @link https://volcrado.com/
- *
  */
 
 if (!defined('FERNICO')) {
-    fernico_destroy();
+    http_response_code(403);
+    exit('Forbidden');
 }
 
-/*
- * This class is extended by AstridController (fundamental controller).
- */
+class AstridSession
+{
+    public function __construct()
+    {
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            return; // Already started by a parent request.
+        }
 
-class AstridSession {
+        // Cookie hardening - use lax sameSite to keep OAuth-style
+        // redirects working but block CSRF from third-party origins.
+        ini_set('session.use_only_cookies', '1');
+        ini_set('session.use_strict_mode', '1');
+        ini_set('session.cookie_httponly', '1');
 
-    private $session_name, $secure, $http_only;
+        $sessionName = Config::fetch('SESSION_NAME') ?: 'fernico_session';
+        $secure = (bool) Config::fetch('SECURE');
+        $httpOnly = (bool) Config::fetch('HTTP_ONLY');
 
-    public function __construct() {
+        $params = session_get_cookie_params();
 
-        ini_set('session.use_only_cookies', 1);
-        ini_set('session.hash_function', 'sha512');
-        ini_set('session.hash_bits_per_character', 5);
-        ini_set('session.hash_bits_per_character', 5);
-        ini_set('session.entropy_file', '/dev/urandom');
-        ini_set('session.entropy_length', '512');
+        // PHP 7.3+ supports the SameSite option natively via an array.
+        if (PHP_VERSION_ID >= 70300) {
+            session_set_cookie_params([
+                'lifetime' => $params['lifetime'],
+                'path'     => $params['path'],
+                'domain'   => $params['domain'],
+                'secure'   => $secure,
+                'httponly' => $httpOnly,
+                'samesite' => 'Lax',
+            ]);
+        } else {
+            session_set_cookie_params(
+                $params['lifetime'],
+                $params['path'],
+                $params['domain'],
+                $secure,
+                $httpOnly
+            );
+        }
 
-        $this->session_name = Config::fetch('SESSION_NAME');
-        $this->secure = Config::fetch('SECURE');
-        $this->http_only = Config::fetch('HTTP_ONLY');
-
-        $cookieParams = session_get_cookie_params();
-        session_set_cookie_params($cookieParams["lifetime"], $cookieParams["path"], $cookieParams["domain"],
-            $this->secure, $this->http_only);
-        session_name($this->session_name);
+        session_name($sessionName);
         session_start();
 
+        // Periodic regeneration to mitigate fixation attacks.
+        if (empty($_SESSION['__regen_at']) || $_SESSION['__regen_at'] < time() - 1800) {
+            session_regenerate_id(true);
+            $_SESSION['__regen_at'] = time();
+        }
     }
-
 }

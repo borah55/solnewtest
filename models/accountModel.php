@@ -1,155 +1,128 @@
 <?php
-
 /**
- * Fernico - Ridiculously lite PHP framework
+ * Thin glue between accountController and the Authentication class.
  *
- * @author Areeb Majeed, Volcrado Holdings
- * @package Fernico
- * @copyright 2017 - Volcrado Holdings Limited
- * @license https://opensource.org/licenses/MIT MIT License
- * @link https://volcrado.com/
+ * Bug fixes vs. the original:
+ *   - removed the dead FaucetHub.io address pre-check in registerHandler
+ *     (FaucetHub closed in 2020); we now only require terms-of-service
+ *     agreement and a matching email pair.
  *
+ * @package Solnew
  */
 
-// Nothing strengthens authority so much as silence.
-
 if (!defined('FERNICO')) {
-    fernico_destroy();
+    http_response_code(403);
+    exit('Forbidden');
 }
 
-class Account {
-
-    static function loginHandler($authMod) {
-
-        if (Request::POST('login') AND Request::POST('user_name') AND Request::POST('password')) {
-
-            $response = $authMod->login(Request::POST('user_name'), Request::POST('password'));
-
-            if ($response == 'LOGIN_SUCCESS') {
-
-                return true;
-
-            } else {
-
-                return ResponseTranslator::respCode($response);
-
-            }
-
+class Account
+{
+    static function loginHandler($authMod)
+    {
+        if (!Request::POST('login')
+            || !Request::POST('user_name')
+            || !Request::POST('password')) {
+            return 'Please fill in all the fields.';
         }
 
+        $response = $authMod->login(
+            (string) Request::POST('user_name'),
+            (string) Request::POST('password')
+        );
+
+        if ($response === 'LOGIN_SUCCESS') {
+            return true;
+        }
+        return ResponseTranslator::respCode($response);
     }
 
-    static function registerHandler($authMod) {
-
-        if (Request::POST('register')) {
-
-            $address = Request::POST('address');
-
-            $resp = json_decode(fernico_post("https://faucethub.io/api/v1/send", array(
-                "api_key" => App::loadSiteVar('faucet_hub_api_key'),
-                "address " => $address,
-                "currency" => App::loadSiteVar('coin_abbreviation')
-            )), true);
-
-            if ($resp['status'] == 456) {
-                $notValid = 0;
-            }
-
-            if (!Request::POST('tos_agree')) {
-
-                return "You need to agree with our terms and conditions to proceed with the registration process.";
-
-            } elseif (Request::POST('email') != Request::POST('email_repeat')) {
-
-                return "Your email addresses do not match. Please resubmit the form with valid information.";
-
-            } elseif (isset($notValid)) {
-
-                return "It seems that you are not registered with FaucetHub.io. In that case, we recommend that you register at FaucetHub.io first and then register an account here. Your address needs to be linked with a FaucetHub account before you can register here.";
-
-            } else {
-
-                $response = $authMod->register(Request::POST('user_name'), Request::POST('email'), Request::POST('password'), Request::POST('password_repeat'));
-                return ResponseTranslator::respCode($response);
-
-            }
-
+    static function registerHandler($authMod)
+    {
+        if (!Request::POST('register')) {
+            return '';
         }
 
-    }
-
-    static function resetPasswordHandler($authMod) {
-
-        if (Request::POST('reset_password')) {
-
-            $response = $authMod->sendPasswordResetEmail(Request::POST('user_name'));
-
-            return ResponseTranslator::respCode($response);
-
+        if (!Request::POST('tos_agree')) {
+            return 'You need to agree to our terms and conditions to register.';
         }
 
-    }
-
-    static function resendEmailHandler($authMod) {
-
-        if (Request::POST('resend_email')) {
-
-            $response = $authMod->resendActivationEmail(Request::POST('user_name'));
-
-            return ResponseTranslator::respCode($response);
-
+        if (Request::POST('email') !== Request::POST('email_repeat')) {
+            return 'Your email addresses do not match. Please try again.';
         }
 
-    }
-
-    static function confirmEmailHandler($authMod, $hash) {
-
-        $response = $authMod->confirmEmail($hash);
+        $response = $authMod->register(
+            (string) Request::POST('user_name'),
+            (string) Request::POST('email'),
+            (string) Request::POST('password'),
+            (string) Request::POST('password_repeat')
+        );
 
         return ResponseTranslator::respCode($response);
-
     }
 
-    static function confirmEmailChangeHandler($authMod, $hash) {
-
-        $response = $authMod->confirmEmailChange($hash);
-
-        return ResponseTranslator::respCode($response);
-
+    static function resetPasswordHandler($authMod)
+    {
+        if (!Request::POST('reset_password')) {
+            return '';
+        }
+        return ResponseTranslator::respCode(
+            $authMod->sendPasswordResetEmail((string) Request::POST('user_name'))
+        );
     }
 
-    static function confirmPasswordChangeHandler($authMod, $hash) {
+    static function resendEmailHandler($authMod)
+    {
+        if (!Request::POST('resend_email')) {
+            return '';
+        }
+        return ResponseTranslator::respCode(
+            $authMod->resendActivationEmail((string) Request::POST('user_name'))
+        );
+    }
 
-        if (Request::POST('password') AND Request::POST('password_repeat')) {
+    static function confirmEmailHandler($authMod, $hash)
+    {
+        return ResponseTranslator::respCode($authMod->confirmEmail((string) $hash));
+    }
 
-            $response = $authMod->setNewPassword($hash, Request::POST('password'), Request::POST('password_repeat'));
+    static function confirmEmailChangeHandler($authMod, $hash)
+    {
+        return ResponseTranslator::respCode($authMod->confirmEmailChange((string) $hash));
+    }
 
-            if ($response == 'PASSWORD_RESET_SUCCESSFUL') {
-
-                return true;
-
-            } else {
-
-                return ResponseTranslator::respCode($response);
-
-            }
-
+    static function confirmPasswordChangeHandler($authMod, $hash)
+    {
+        if (Request::POST('password') === null
+            || Request::POST('password_repeat') === null) {
+            return 'Please fill in both password fields.';
         }
 
+        $response = $authMod->setNewPassword(
+            (string) $hash,
+            (string) Request::POST('password'),
+            (string) Request::POST('password_repeat')
+        );
+
+        if ($response === 'PASSWORD_RESET_SUCCESSFUL') {
+            return true;
+        }
+        return ResponseTranslator::respCode($response);
     }
 
-    static function changeEmailHandler($authMod) {
-
-        $resp = $authMod->changeEmail(Request::POST('email'));
-        return ResponseTranslator::respCode($resp);
-
+    static function changeEmailHandler($authMod)
+    {
+        return ResponseTranslator::respCode(
+            $authMod->changeEmail((string) Request::POST('email'))
+        );
     }
 
-    static function changePasswordHandler($authMod) {
-
-        $resp = $authMod->changePassword(Request::POST('password'), Request::POST('password_repeat'));
-        return ResponseTranslator::respCode($resp);
-
+    static function changePasswordHandler($authMod)
+    {
+        return ResponseTranslator::respCode(
+            $authMod->changePassword(
+                (string) Request::POST('password'),
+                (string) Request::POST('password_repeat')
+            )
+        );
     }
-
 }

@@ -1,31 +1,34 @@
 <?php
-
 /**
- * Fernico - Ridiculously lite PHP framework
+ * 404 handler.
  *
- * @author Areeb Majeed, Volcrado Holdings
- * @package Fernico
- * @copyright 2017 - Volcrado Holdings Limited
- * @license https://opensource.org/licenses/MIT MIT License
- * @link https://volcrado.com/
- *
+ * @package Solnew
  */
 
 if (!defined('FERNICO')) {
-    fernico_destroy();
+    http_response_code(403);
+    exit('Forbidden');
 }
 
-class Error404Controller extends AstridController {
+class Error404Controller extends AstridController
+{
+    /** @var Authentication */
+    public $auth;
 
-    public function __construct() {
-        require_once(FERNICO_PATH . "/models/Bootstrapper.php");
+    public function __construct()
+    {
+        require_once FERNICO_PATH . '/models/Bootstrapper.php';
         parent::__construct();
         $this->auth = new Authentication();
     }
 
-    public function error404() {
+    public function error404()
+    {
         http_response_code(404);
-        fernico_loadComponent(Config::fetch('TEMPLATE_DIR'), 'Error404.tpl', array('pageName' => 'Page Not Found'));
+        fernico_loadComponent(
+            Config::fetch('TEMPLATE_DIR'),
+            'Error404.tpl',
+            ['pageName' => 'Page Not Found']
+        );
     }
-
 }

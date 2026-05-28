@@ -1,161 +1,191 @@
 <?php
-
 /**
- * Fernico - Ridiculously lite PHP framework
+ * Fernico kernel - request lifecycle.
  *
- * @author Areeb Majeed, Volcrado Holdings
+ * Wires the database connection, parses the URL into controller/action/
+ * arguments, instantiates the matching controller and dispatches.
+ *
  * @package Fernico
- * @copyright 2017 - Volcrado Holdings Limited
- * @license https://opensource.org/licenses/MIT MIT License
- * @link https://volcrado.com/
- *
  */
 
 if (!defined('FERNICO')) {
-    fernico_destroy();
+    http_response_code(403);
+    exit('Forbidden');
 }
 
-require_once(FERNICO_PATH . '/config/config.php');
-require_once('Config.php');
-require_once('DependenciesLoader.php');
-require_once('Core.php');
-require_once('Request.php');
-require_once('AstridSession.php');
-require_once('AstridController.php');
-require_once(FERNICO_PATH . '/functions/Loader.php');
+// Configuration must exist before any framework code runs.
+if (!file_exists(FERNICO_PATH . '/config/config.php')) {
+    // Hand off to the installer if we are uninstalled.
+    if (file_exists(FERNICO_PATH . '/resources/Installer/index.php')) {
+        require FERNICO_PATH . '/resources/Installer/index.php';
+        exit;
+    }
+    http_response_code(500);
+    exit('Configuration is missing. Please run the installer.');
+}
 
-class fernico {
+require_once FERNICO_PATH . '/config/config.php';
+require_once __DIR__ . '/Config.php';
+require_once __DIR__ . '/Core.php';
+require_once __DIR__ . '/Request.php';
+require_once __DIR__ . '/AstridSession.php';
+require_once __DIR__ . '/AstridController.php';
+require_once __DIR__ . '/DependenciesLoader.php';
+require_once FERNICO_PATH . '/functions/Loader.php';
 
+class fernico
+{
+    /** @var object|null Currently-dispatched controller instance. */
     private $controller;
-    private $parameters = array();
+
+    /** @var array<int,string> URL segments after controller/action. */
+    private $parameters = [];
+
+    /** @var string|null Controller name as it appeared in the URL. */
     private $controller_name;
+
+    /** @var string|null Action name as it appeared in the URL. */
     private $action_name;
-    private $controller_name_parsed;
 
-    /*
-     * Initializes the system by calling the necessary functions present in this class.
-     */
+    /** @var string|null Controller class name (with hyphens converted). */
+    private $controller_class;
 
-    public function __construct() {
+    public function __construct()
+    {
         $this->startDatabaseConnection();
         $this->parseURL($this->retrievePath());
         $this->defineControllerActions();
         $this->loadController();
     }
 
-    /*
-     * This function generates a database connection to the MySQL server. The global variable is available through the framework.
+    /**
+     * Open the global mysqli connection used by the rest of the app.
+     *
+     * Stored in the well-known $fernico_db global to preserve the API
+     * the existing controllers rely on.
      */
-
-    private function startDatabaseConnection() {
-
+    private function startDatabaseConnection()
+    {
         global $fernico_db;
-        $fernico_db = new mysqli(Config::fetch('DATABASE_HOST'), Config::fetch('DATABASE_USER'),
-            Config::fetch('DATABASE_PASSWORD'), Config::fetch('DATABASE_NAME'));
+
+        // Strict error reporting from mysqli during development; in
+        // production fernico_criticalErrorHandler swallows the output.
+        mysqli_report(MYSQLI_REPORT_OFF);
+
+        $fernico_db = @new mysqli(
+            Config::fetch('DATABASE_HOST'),
+            Config::fetch('DATABASE_USER'),
+            Config::fetch('DATABASE_PASSWORD'),
+            Config::fetch('DATABASE_NAME')
+        );
 
         if ($fernico_db->connect_errno) {
-            fernico_reportError($fernico_db->connect_errno);
+            fernico_reportError('DB connect: ' . $fernico_db->connect_error);
+            http_response_code(503);
+            exit('Database connection failed.');
         }
 
+        $fernico_db->set_charset('utf8mb4');
     }
 
-    /*
-     * This function breaks the URL and passes the needed format to the parseURL function to obtain controller, action and parameters.
+    /**
+     * Pull the route from the rewritten ?param= query string.
      */
+    private function retrievePath()
+    {
+        return Request::GET('param');
+    }
 
-    private function parseURL($url) {
-        $url = trim($url, '/');
+    /**
+     * Split the path into controller / action / extra parameters.
+     *
+     * Example: "page/affiliate-programme/foo/bar" becomes
+     *   controller_name = "page",
+     *   action_name     = "affiliate-programme",
+     *   parameters      = ["foo", "bar"].
+     */
+    private function parseURL($url)
+    {
+        $url = trim((string) $url, '/');
         $url = filter_var($url, FILTER_SANITIZE_URL);
-        $url = explode('/', $url);
-        $this->controller_name = isset($url[0]) ? $url[0] : null;
-        $this->action_name = isset($url[1]) ? $url[1] : null;
-        unset($url[0], $url[1]);
-        $this->parameters = array_values($url);
+        $segments = $url === '' ? [] : explode('/', $url);
+
+        $this->controller_name = $segments[0] ?? null;
+        $this->action_name = $segments[1] ?? null;
+
+        // Anything after position 1 becomes an action parameter.
+        $this->parameters = array_slice($segments, 2);
     }
 
-    /*
-     * This function checks if the controller and action exists. If either doesn't exist, the Error404Controller is called.
-     * In case of present parameters, this calls back the method with an array of parameters set in the URL.
+    /**
+     * Apply defaults and translate URL hyphens to PHP-friendly names.
      */
-
-    private function retrievePath() {
-
-        $url = Request::GET('param');
-        return $url;
-
-    }
-
-    /*
-     * This function splits the URL and obtains the controller, action/method and parameters.
-     * For instance, assume the following URL: https:/rapid2fa.com/page/about/history
-     *
-     * In this URL, 'page' is the controller, 'about' is an action/method, and history is a parameter.
-     *
-     * This function extracts the controller, action/method and sets all parameters in an array.
-     */
-
-    private function defineControllerActions() {
-
+    private function defineControllerActions()
+    {
         if (!$this->controller_name) {
             $this->controller_name = Config::fetch('DEFAULT_CONTROLLER');
         }
 
-        if (!$this->action_name OR empty($this->action_name)) {
+        if (!$this->action_name) {
             $this->action_name = Config::fetch('DEFAULT_ACTION');
         }
 
-        $this->action_name = str_replace('-','__',$this->action_name);
+        // Hyphens are illegal in PHP identifiers, so we map them to
+        // double-underscore. e.g. "reset-password" -> "reset__password".
+        $this->action_name = str_replace('-', '__', $this->action_name);
+
         $this->controller_name = $this->controller_name . 'Controller';
-        $this->controller_name_parsed = str_replace('-','__',$this->controller_name);
+        $this->controller_class = str_replace('-', '__', $this->controller_name);
 
-        define("ACTION_NAME", $this->action_name);
-        define("CONTROLLER_NAME", $this->controller_name);
-
+        define('ACTION_NAME', $this->action_name);
+        define('CONTROLLER_NAME', $this->controller_name);
     }
 
-    /*
-     * This function once called defines default controller and method/action in case they haven't been set.
-     * Useful when you've to load your homepage (or in similar cases).
-     *
-     * To set the default controller and action, please edit the config/config.php file.
-     *
+    /**
+     * Locate, instantiate and dispatch to the resolved controller. If
+     * either the file or the action cannot be found we fall through to
+     * the 404 controller.
      */
+    private function loadController()
+    {
+        $path = FERNICO_PATH . '/controllers/' . $this->controller_name . '.php';
 
-    private function loadController() {
-
-        if (file_exists(FERNICO_PATH . '/controllers/' . $this->controller_name . '.php')) {
-
-            require(FERNICO_PATH . '/controllers/' . $this->controller_name . '.php');
-            $this->controller = new $this->controller_name_parsed();
-
-            if (method_exists($this->controller, $this->action_name)) {
-
-                if (!empty($this->parameters)) {
-                    call_user_func_array(array($this->controller, $this->action_name), $this->parameters);
-                } else {
-                    $this->controller->{$this->action_name}();
-                }
-
-            } else {
-
-                $this->controller_name = "Error404Controller";
-                $this->action_name = "error404";
-                require(FERNICO_PATH . '/controllers/' . $this->controller_name . '.php');
-                $this->controller = new $this->controller_name();
-                $this->controller->{$this->action_name}();
-
-            }
-
-        } else {
-
-            $this->controller_name = "Error404Controller";
-            $this->action_name = "error404";
-            require(FERNICO_PATH . '/controllers/' . $this->controller_name . '.php');
-            $this->controller = new $this->controller_name();
-            $this->controller->{$this->action_name}();
-
+        if (!file_exists($path)) {
+            $this->dispatch404();
+            return;
         }
 
+        require_once $path;
+
+        if (!class_exists($this->controller_class)) {
+            $this->dispatch404();
+            return;
+        }
+
+        $this->controller = new $this->controller_class();
+
+        if (!method_exists($this->controller, $this->action_name)) {
+            $this->dispatch404();
+            return;
+        }
+
+        if (!empty($this->parameters)) {
+            call_user_func_array(
+                [$this->controller, $this->action_name],
+                $this->parameters
+            );
+        } else {
+            $this->controller->{$this->action_name}();
+        }
     }
 
+    /**
+     * Render the 404 page through its dedicated controller.
+     */
+    private function dispatch404()
+    {
+        require_once FERNICO_PATH . '/controllers/Error404Controller.php';
+        $controller = new Error404Controller();
+        $controller->error404();
+    }
 }

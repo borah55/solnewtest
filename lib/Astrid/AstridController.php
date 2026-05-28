@@ -1,50 +1,63 @@
 <?php
-
 /**
- * Fernico - Ridiculously lite PHP framework
+ * Base controller. All page controllers extend this class.
  *
- * @author Areeb Majeed, Volcrado Holdings
+ * Provides the renderTemplate() helper which wraps Smarty so individual
+ * controllers don't have to deal with template path resolution.
+ *
  * @package Fernico
- * @copyright 2017 - Volcrado Holdings Limited
- * @license https://opensource.org/licenses/MIT MIT License
- * @link https://volcrado.com/
- *
  */
 
 if (!defined('FERNICO')) {
-    fernico_destroy();
+    http_response_code(403);
+    exit('Forbidden');
 }
 
-/*
- * This is the fundamental controller. The other child controllers extend this class and come under it.
- */
-
-class AstridController extends AstridSession {
-
-    /*
-     * This function is usually called from the child controller to render a template.
-     * Fernico uses Smarty to render templates and to populate them with data.
+class AstridController extends AstridSession
+{
+    /**
+     * Render a template through Smarty with the supplied options as
+     * assigned variables.
      *
-     * Necessary settings relating to this function may be found at config/config.php file.
+     * @param string $template Template path relative to the active theme.
+     * @param array  $options  Variables to expose to the template.
      */
+    public function renderTemplate($template, array $options = [])
+    {
+        $smarty = new Smarty();
 
-    public function renderTemplate($template, $options = array()) {
+        // Pop any one-shot flash message - it survives one redirect.
+        $flash = isset($_SESSION['flash']) ? (string) $_SESSION['flash'] : '';
+        unset($_SESSION['flash']);
 
-        $smarty = new Smarty;
+        // Common variables that every page expects.
+        $options = array_merge([
+            'csrf_token' => fernico_generateAntiCSRFToken(),
+            'site_url'   => fernico_getAbsURL(),
+            'flash'      => $flash,
+        ], $options);
 
         foreach ($options as $key => $value) {
             $smarty->assign($key, $value);
         }
 
-        if(defined("CSS_FIX")) {
-            $smarty->assign("css_fix", CSS_FIX);
+        if (defined('CSS_FIX')) {
+            $smarty->assign('css_fix', CSS_FIX);
         }
 
-        $smarty->setCompileDir(Config::fetch('TEMPLATE_COMPILED_DIR'));
+        $compileDir = Config::fetch('TEMPLATE_COMPILED_DIR');
+        if ($compileDir && !is_dir($compileDir)) {
+            @mkdir($compileDir, 0755, true);
+        }
+
+        $smarty->setCompileDir($compileDir);
         $smarty->loadFilter('output', 'trimwhitespace');
-        $smarty->force_compile = true;
-        $smarty->display(FERNICO_PATH . '/views/' . Config::fetch("TEMPLATE_DIR") . '/' . $template);
 
+        // Force compile only outside production - it is wasteful in prod.
+        $smarty->force_compile = (bool) Config::fetch('TEMPLATE_FORCE_COMPILE');
+
+        $smarty->display(
+            FERNICO_PATH . '/views/' . Config::fetch('TEMPLATE_DIR') . '/' . $template
+        );
     }
-
 }

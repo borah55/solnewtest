@@ -1,415 +1,281 @@
 <?php
+/**
+ * Solnew installer wizard.
+ *
+ * Bug fixes vs. the original:
+ *   * UPDATE config SET value = ? WHERE name = ?  (column is `parameter`)
+ *   * rmdir(... 'installer') used a different case to the actual folder
+ *   * sha1(time . mt_rand) replaced with random_bytes(32)
+ *   * the "successfully installed" message had a stray space inside the
+ *     class attribute ("alert alert - success")
+ *   * the user could submit blank fields and trigger SQL warnings
+ *
+ * @package Solnew\Installer
+ */
 
-define("FERNICO_PATH", str_replace("/resources/Installer", "", __DIR__));
-define("FERNICO", true);
+if (!defined('FERNICO')) {
+    define('FERNICO_PATH', dirname(dirname(__DIR__)));
+    define('FERNICO', true);
+}
 
-require_once(FERNICO_PATH . '/config/config.php');
-require_once('functions.php');
-
-define("SITE_URL", getURL());
-
-if (defined("SCRIPT_INSTALLED")) {
-
-    rrmdir(FERNICO_PATH . "/resources/Installer");
-    header("Location: " . SITE_URL);
-    exit();
-
-} else {
-
-    $pageName = "Script Installer";
-
-    $php_version = PHP_VERSION;
-    $status = 1;
-
-    if (version_compare(PHP_VERSION, '5.3.7', '<')) {
-        $php_version_status = '<span style="color:red;">Incompatible</span>';
-        $status = 0;
-    } elseif (version_compare(PHP_VERSION, '5.5.0', '<')) {
-        $php_version_status = '<span style="color:orange;">Compatible</span>';
-    } else {
-        $php_version_status = '<span style="color:green;">OK</span>';
+// If we are already installed, just bounce people back home.
+if (file_exists(FERNICO_PATH . '/config/config.php')) {
+    require_once FERNICO_PATH . '/config/config.php';
+    if (defined('SCRIPT_INSTALLED')) {
+        header('Location: /');
+        exit;
     }
+}
 
-    $filename = FERNICO_PATH . '/config';
+require_once __DIR__ . '/functions.php';
 
-    if (is_writable($filename)) {
-        $writable = '<span style="color:green;">Writable</span>';
-    } else {
-        $writable = '<span style="color:red;">Insufficient Permission</span>';
-        $status = 0;
+$siteUrl = installer_detect_url();
+
+// ------------------------------ Pre-flight ----------------------------
+$status = true;
+$checks = [];
+
+$checks[] = [
+    'label'   => 'PHP version',
+    'value'   => PHP_VERSION,
+    'state'   => version_compare(PHP_VERSION, '7.1.0', '>=') ? 'ok' : 'err',
+    'message' => version_compare(PHP_VERSION, '7.1.0', '>=') ? 'OK' : 'PHP 7.1+ required',
+];
+
+foreach (['config', 'resources', 'storage'] as $dir) {
+    $path = FERNICO_PATH . '/' . $dir;
+    $writable = is_writable($path);
+    $checks[] = [
+        'label'   => 'Writable: <code>/' . $dir . '/</code>',
+        'value'   => '',
+        'state'   => $writable ? 'ok' : 'err',
+        'message' => $writable ? 'Writable' : 'Insufficient permission',
+    ];
+    if (!$writable) {
+        $status = false;
     }
+}
 
-    $filename = FERNICO_PATH . '/resources';
-
-    if (is_writable($filename)) {
-        $writable2 = '<span style="color:green;">Writable</span>';
-    } else {
-        $writable2 = '<span style="color:red;">Insufficient Permission</span>';
-        $status = 0;
+foreach (['mb_strtolower' => 'mbstring', 'curl_exec' => 'cURL', 'mysqli_stmt_get_result' => 'mysqlnd', 'random_bytes' => 'random_bytes', 'password_hash' => 'password_hash'] as $fn => $label) {
+    $present = function_exists($fn);
+    $checks[] = [
+        'label'   => $label,
+        'value'   => '',
+        'state'   => $present ? 'ok' : 'err',
+        'message' => $present ? 'Installed' : 'Not installed',
+    ];
+    if (!$present) {
+        $status = false;
     }
+}
 
-    $filename = FERNICO_PATH . '/storage';
-
-    if (is_writable($filename)) {
-        $writable3 = '<span style="color:green;">Writable</span>';
-    } else {
-        $writable3 = '<span style="color:red;">Insufficient Permission</span>';
-        $status = 0;
+if (!$status) {
+    installer_header('Installation requirements');
+    echo '<h1>Installation requirements</h1>';
+    echo '<p>Please address the items marked in red, then refresh this page.</p>';
+    echo '<div class="check-grid">';
+    foreach ($checks as $c) {
+        echo '<div class="check-row"><span>' . $c['label']
+           . ($c['value'] ? ' &mdash; ' . htmlspecialchars($c['value']) : '')
+           . '</span><span class="' . $c['state'] . '">' . $c['message'] . '</span></div>';
     }
+    echo '</div>';
+    installer_footer();
+    exit;
+}
 
-    if (function_exists('mb_strtolower')) {
-        $mbstring = '<span style="color:green;">Installed</span>';
+// ------------------------------ Form submit ---------------------------
+$error = '';
+$success = '';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit'])) {
+    $domain        = installer_clean_input($_POST['domain'] ?? '');
+    $contactEmail  = installer_clean_input($_POST['contact_email'] ?? '');
+    $dbHost        = installer_clean_input($_POST['db_host'] ?? '');
+    $dbUser        = installer_clean_input($_POST['db_user'] ?? '');
+    $dbPass        = (string) ($_POST['db_pass'] ?? '');
+    $dbName        = installer_clean_input($_POST['db_name'] ?? '');
+    $userName      = installer_clean_input($_POST['user_name'] ?? '');
+    $password      = (string) ($_POST['password'] ?? '');
+
+    if (!installer_is_valid_domain($domain)) {
+        $error = 'The website domain is not valid.';
+    } elseif (!filter_var($contactEmail, FILTER_VALIDATE_EMAIL)) {
+        $error = 'The contact email is not a valid email.';
+    } elseif ($dbHost === '' || $dbUser === '' || $dbName === '') {
+        $error = 'All database fields are required.';
+    } elseif ($userName === '' || strlen($userName) > 16
+              || preg_match('/[\'^£$%&*()}{@#~?><>,|=_+¬-]/', $userName)) {
+        $error = 'The admin username is missing or contains invalid characters.';
+    } elseif (strlen($password) < 6) {
+        $error = 'The admin password must be at least 6 characters.';
     } else {
-        $mbstring = '<span style="color:red;">Not Installed</span>';
-        $status = 0;
-    }
+        $con = @new mysqli($dbHost, $dbUser, $dbPass);
+        if ($con->connect_errno) {
+            $error = 'Database connection failed: ' . htmlspecialchars($con->connect_error);
+        } else {
+            $createSql = 'CREATE DATABASE IF NOT EXISTS `' . str_replace('`', '', $dbName)
+                       . '` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci';
+            $con->query($createSql);
+            $con->select_db($dbName);
+            $con->set_charset('utf8mb4');
 
-    if (function_exists('curl_exec')) {
-        $curl = '<span style="color:green;">Installed</span>';
-    } else {
-        $curl = '<span style="color:red;">Not Installed</span>';
-        $status = 0;
-    }
-
-    if (function_exists('mysqli_stmt_get_result')) {
-        $mysqlnd = '<span style="color:green;">Installed</span>';
-    } else {
-        $mysqlnd = '<span style="color:red;">Not Installed</span>';
-        $status = 0;
-    }
-
-    vomitHeader();
-
-    ?>
-
-    <div id="requirements">
-
-    <span style="font-size:135%;"><b>PHP Version</b> &mdash; <?php echo $php_version; ?> &mdash; <b><?php echo $php_version_status; ?></b></span>
-    <br>
-    <span style="font-size:135%;"><b>Write Permission #1</b> &mdash; config &mdash; <b><?php echo $writable; ?></b></span>
-    <br>
-    <span style="font-size:135%;"><b>Write Permission #2</b> &mdash; resources &mdash; <b><?php echo $writable2; ?></b></span>
-    <br>
-    <span style="font-size:135%;"><b>Write Permission #3</b> &mdash; storage &mdash; <b><?php echo $writable3; ?></b></span>
-    <br>
-    <span style="font-size:135%;"><b>mb_string</b> &mdash; Availability &mdash; <b><?php echo $mbstring; ?></b></span>
-    <br>
-    <span style="font-size:135%;"><b>Curl (PHP)</b> &mdash; Availability &mdash; <b><?php echo $curl; ?></b></span>
-    <br>
-    <span style="font-size:135%;"><b>MySQL Native Driver</b> &mdash; Availability &mdash; <b><?php echo $mysqlnd; ?></b></span>
-
-    <br>
-    <br>
-
-    <?php if ($status == 0) { ?>
-
-        <p style="font-size:125%;"><b>Looks like one or more things required for the script to function properly are not available. Please use the above information to advance.</b></p>
-
-    <?php } else { ?>
-
-        <?php
-
-        $scheme = "http";
-
-        if (!empty($s['HTTPS']) && $s['HTTPS'] == 'on') {
-            $scheme = "https";
-        }
-
-        $website_url_prepared = cleanInput(SITE_URL);
-        $domain_prepared = cleanInput($_SERVER['HTTP_HOST']);
-
-        if (isset($_POST['submit'])) {
-
-            $domain = cleanInput($_POST['domain']);
-            $contact_email = cleanInput($_POST['contact_email']);
-
-            $db_host = cleanInput($_POST['db_host']);
-            $db_user = cleanInput($_POST['db_user']);
-            $db_pass = cleanInput($_POST['db_pass']);
-            $db_name = cleanInput($_POST['db_name']);
-
-            $user_name = cleanInput($_POST['user_name']);
-            $password = cleanInput($_POST['password']);
-
-            if (!is_valid_domain_name($domain)) {
-
-                echo '<div class="alert alert-danger">
-                        The <b>Website Domain</b> is not valid.
-                        </div>';
-
-            } elseif (!filter_var($contact_email, FILTER_VALIDATE_EMAIL)) {
-
-                echo '<div class="alert alert-danger">
-                    The <b>Contact Email</b> is not a valid email.
-                    </div>';
-
-            } elseif ($db_host == "") {
-
-                echo '<div class="alert alert-danger">
-                    The <b>DB Host</b> is not valid.
-                    </div>';
-
-            } elseif ($db_user == "") {
-
-                echo '<div class="alert alert-danger">
-                        The <b>DB User</b> is not valid.
-                        </div>';
-
-            } elseif ($db_pass == "") {
-
-                echo '<div class="alert alert-danger">
-                    The <b>DB Pass</b> is not valid.
-                    </div>';
-
-            } elseif ($db_name == "") {
-
-                echo '<div class="alert alert-danger">
-                        The <b>DB Name</b> is not valid.
-                        </div>';
-
-            } elseif ($user_name == "") {
-
-                echo '<div class="alert alert-danger">
-                        The <b>Username</b> is not valid.
-                        </div>';
-
-            } elseif (strlen($user_name) > 16) {
-
-                echo '<div class="alert alert-danger">
-                    The <b>Username</b> length is limited to 16 characters.
-                    </div>';
-
-            } elseif (preg_match('/[\'^£$%&*()}{@#~?><>,|=_+¬-]/', $user_name)) {
-
-                echo '<div class="alert alert-danger">
-                The <b>Username</b> cannot contain special characters.
-                </div>';
-
-            } elseif ($password == "") {
-
-                echo '<div class="alert alert-danger">
-                The <b>Password</b> has been left blank.
-                </div>';
-
-            } else {
-
-                $con = mysqli_connect($db_host, $db_user, $db_pass);
-
-                if (!$con) {
-
-                    echo '<div class="alert alert-danger">
-                        The <b>Database</b> connection details are not valid.
-                        </div>';
-
-                } else {
-
-                    mysqli_query($con, "CREATE DATABASE IF NOT EXISTS " . $db_name);
-
-                    mysqli_select_db($con, $db_name);
-                    mysqli_query($con, "USE " . $db_name);
-
-                    $templine = "";
-                    $lines = file(FERNICO_PATH . "/resources/Installer/sql.txt");
-
-                    foreach ($lines as $line) {
-
-                        if (substr($line, 0, 2) == '--' || $line == '') {
-                            continue;
-                        }
-
-                        $templine .= $line;
-
-                        if (substr(trim($line), -1, 1) == ';') {
-                            mysqli_query($con, $templine);
-                            $templine = '';
-                        }
-
+            // Run the schema as a single multi-statement block so we
+            // don't have to parse semicolons by hand.
+            $sql = file_get_contents(__DIR__ . '/schema.sql');
+            if ($con->multi_query($sql)) {
+                while ($con->more_results() && $con->next_result()) {
+                    if ($result = $con->store_result()) {
+                        $result->free();
                     }
-
-                    $password_hash = generatePasswordHash($password);
-                    $noReplyEmail = "no.reply@" . $domain;
-                    $date = date("Y-m-d H:i:s");
-                    $cookie_domain = "." . $domain;
-
-                    mysqli_query($con, "INSERT INTO admin_details (user_name,password) VALUES ('{$user_name}','{$password_hash}')");
-                    mysqli_query($con, "UPDATE config SET value = '{$noReplyEmail}' WHERE name = 'no_reply_email_address'");
-                    mysqli_query($con, "UPDATE config SET value = '{$contact_email}' WHERE name = 'contact_email_address'");
-
-                    $cookie_hash = hash("sha256", time() . time() . time() . uniqid() . uniqid() . mt_rand());
-
-                    $content = '<?php
-
-if (!defined(\'FERNICO\')) {
-    fernico_destroy();
-}
-
-define("SCRIPT_INSTALLED", true);
-
-$fernico_db_settings = array(
-    "DATABASE_HOST" => "' . $db_host . '",
-    "DATABASE_NAME" => "' . $db_name . '",
-    "DATABASE_USER" => "' . $db_user . '",
-    "DATABASE_PASSWORD" => "' . $db_pass . '"
-);
-
-$fernico_misc_settings = array(
-    "COOKIE_DOMAIN" => "' . $cookie_domain . '",
-    "COOKIE_SECRET" => "' . sha1(time() . mt_Rand() . uniqid()) . '",
-    "WEBSITE_URL" => ""
-);
-
-/*
- * Please do not edit below this line unless you know what you\'re doing. We do not recommend editing any below setting without appropriate knowledge.
- * The configuration settings should only be changed on the suggestion of Volcrado engineers.
- *
- */
-
-$fernico_core_settings = array(
-    "CONNECT_TO_DATABASE" => true,
-    "DEFAULT_CONTROLLER" => "homeIndex",
-    "DEFAULT_ACTION" => "home",
-    "ERROR_REPORTING" => false,
-    "ERROR_LOG_DATABASE" => false,
-    "TEMPLATE_DIR" => "WolvenCore",
-    "TEMPLATE_COMPILED_DIR" => FERNICO_PATH . \'/storage/cache/templates_c\',
-    "SESSION_NAME" => \'wolven_core_session\',
-    "SECURE" => false,
-    "HTTP_ONLY" => true,
-    "SESSION_DAYS" => 30,
-    "CONFIRMATION_CONTROLLER" => "account",
-    "CONFIRMATION_ACTION" => "confirm_account",
-    "RESET_PASSWORD_ACTION" => "confirm_password_change",
-    "CHANGE_EMAIL_CONTROLLER" => "account",
-    "CHANGE_EMAIL_ACTION" => "confirm_email_change"
-);
-
-/*
- * NOTE: To add your own custom settings (maybe, for a plugin or some controller), you need to create an array before this line of comment.
- * The array you created should have a prefix of \'fernico_\' and a suffix of \'_settings\' (for example, $fernico_site_settings), otherwise it won\'t be callable from the Config class.
- *
- * Do not edit beyond this line unless you know what you\'re doing.
- * Combining all arrays together to form one global array.
- * To access these settings, use the Config static class. For instance, $template_dir = Config::fetch("TEMPLATE_DIR");
- */
-
-$ignore = array(
-    \'GLOBALS\',
-    \'_FILES\',
-    \'_COOKIE\',
-    \'_POST\',
-    \'_GET\',
-    \'_SERVER\',
-    \'_ENV\',
-    \'ignore\',
-    \'php_errormsg\',
-    \'HTTP_RAW_POST_DATA\',
-    \'http_response_header\',
-    \'argc\',
-    \'argv\',
-    \'ignore\'
-);
-
-$all_settings_found = array_diff_key(get_defined_vars() + array_flip($ignore), array_flip($ignore));
-$global_fernico_settings = array();
-
-foreach ($all_settings_found as $key => $value) {
-
-    if (substr($key, 0, 8) === \'fernico_\' && substr($key, -9) === \'_settings\') {
-
-        $global_fernico_settings = array_merge($global_fernico_settings, $value);
-
-    }
-
-}
-
-?>';
-
-                    file_put_contents(FERNICO_PATH . "/config/config.php", $content);
-
-                    echo '<div class="alert alert - success">
-                            The script has been <b>successfully installed</b>. Redirecting you to admin login in 15 seconds.
-                          </div>';
-
-                    echo '<script>
-
-                        window.setTimeout(function() {
-                        window.location = "' . SITE_URL . 'admin/login";
-                        }, 15000);
-
-                        </script>';
-
-                    rmdir(FERNICO_PATH . "/resources/installer");
-
                 }
-
             }
 
-        } else {
+            // Seed the admin row.
+            $passwordHash = installer_password_hash($password);
+            $stmt = $con->prepare('INSERT INTO admin_details (user_name, password) VALUES (?, ?)');
+            $stmt->bind_param('ss', $userName, $passwordHash);
+            $stmt->execute();
+            $stmt->close();
 
-            ?>
+            // Note: the original installer used `WHERE name = ?`, but
+            // the column is actually `parameter`. Fixed here.
+            $noReplyEmail = 'no-reply@' . $domain;
+            $stmt = $con->prepare("UPDATE config SET value = ? WHERE parameter = 'no_reply_email_address'");
+            $stmt->bind_param('s', $noReplyEmail);
+            $stmt->execute();
+            $stmt->close();
+            $stmt = $con->prepare("UPDATE config SET value = ? WHERE parameter = 'contact_email_address'");
+            $stmt->bind_param('s', $contactEmail);
+            $stmt->execute();
+            $stmt->close();
 
-            </div>
+            // Build the config.php file from the example, swapping in
+            // the live values.
+            $cookieDomain = '.' . $domain;
+            $cookieSecret = bin2hex(random_bytes(32));
 
-            <form action="" method="post">
+            $config = <<<PHP
+<?php
+/**
+ * Solnew - generated configuration. Do not check this file into source
+ * control. Edit values manually if needed; do not delete this file or
+ * the installer will run again on next request.
+ */
 
-                <div class="form-group">
-                    <label class="control-label">Website Domain:</label>
-                    <input type="text" name="domain" class="form-control" value="<?php echo $domain_prepared; ?>">
-                </div>
-
-                <div class="form-group">
-                    <label class="control-label">Contact Email:</label>
-                    <input type="text" name="contact_email" class="form-control" placeholder="jane.austen@poets.com">
-                </div>
-
-                <br>
-                <br>
-
-                <div class="form-group">
-                    <label class="control-label">Database Host:</label>
-                    <input type="text" name="db_host" class="form-control" value="localhost">
-                </div>
-
-                <div class="form-group">
-                    <label class="control-label">Database User:</label>
-                    <input type="text" name="db_user" class="form-control">
-                </div>
-
-                <div class="form-group">
-                    <label class="control-label">Database Password:</label>
-                    <input type="password" name="db_pass" class="form-control">
-                </div>
-
-                <div class="form-group">
-                    <label class="control-label">Database Name:</label>
-                    <input type="text" name="db_name" class="form-control">
-                </div>
-
-                <br>
-                <br>
-
-                <div class="form-group">
-                    <label class="control-label">Desired Username:</label>
-                    <input type="text" name="user_name" class="form-control">
-                </div>
-
-                <div class="form-group">
-                    <label class="control-label">Desired Password:</label>
-                    <input type="password" name="password" class="form-control">
-                </div>
-
-                <input type="submit" name="submit" value="Install Script" id="submit">
-
-            </form>
-
-            <?php
-
-        }
-
-        vomitFooter();
-
-    }
-
+if (!defined('FERNICO')) {
+    http_response_code(403);
+    exit('Forbidden');
 }
 
-?>
+define('SCRIPT_INSTALLED', true);
+
+\$fernico_db_settings = [
+    'DATABASE_HOST'     => '{$dbHost}',
+    'DATABASE_NAME'     => '{$dbName}',
+    'DATABASE_USER'     => '{$dbUser}',
+    'DATABASE_PASSWORD' => '{$dbPass}',
+];
+
+\$fernico_misc_settings = [
+    'COOKIE_DOMAIN' => '{$cookieDomain}',
+    'COOKIE_SECRET' => '{$cookieSecret}',
+    'WEBSITE_URL'   => '',
+];
+
+\$fernico_core_settings = [
+    'CONNECT_TO_DATABASE'      => true,
+    'DEFAULT_CONTROLLER'       => 'homeIndex',
+    'DEFAULT_ACTION'           => 'home',
+    'ERROR_REPORTING'          => true,
+    'ERROR_LOG_DATABASE'       => false,
+    'TEMPLATE_DIR'             => 'Nova',
+    'TEMPLATE_COMPILED_DIR'    => FERNICO_PATH . '/storage/cache/templates_c',
+    'TEMPLATE_FORCE_COMPILE'   => false,
+    'SESSION_NAME'             => 'solnew_session',
+    'SECURE'                   => false,
+    'HTTP_ONLY'                => true,
+    'SESSION_DAYS'             => 30,
+    'CONFIRMATION_CONTROLLER'  => 'account',
+    'CONFIRMATION_ACTION'      => 'confirm_account',
+    'RESET_PASSWORD_CONTROLLER'=> 'account',
+    'RESET_PASSWORD_ACTION'    => 'confirm_password_change',
+    'CHANGE_EMAIL_CONTROLLER'  => 'account',
+    'CHANGE_EMAIL_ACTION'      => 'confirm_email_change',
+];
+
+\$ignore = [
+    'GLOBALS', '_FILES', '_COOKIE', '_POST', '_GET', '_SERVER',
+    '_ENV', 'ignore', 'php_errormsg', 'HTTP_RAW_POST_DATA',
+    'http_response_header', 'argc', 'argv',
+];
+\$all = array_diff_key(get_defined_vars() + array_flip(\$ignore), array_flip(\$ignore));
+\$global_fernico_settings = [];
+foreach (\$all as \$k => \$v) {
+    if (substr(\$k, 0, 8) === 'fernico_' && substr(\$k, -9) === '_settings') {
+        \$global_fernico_settings = array_merge(\$global_fernico_settings, \$v);
+    }
+}
+PHP;
+
+            file_put_contents(FERNICO_PATH . '/config/config.php', $config);
+
+            // Try to remove the installer so it cannot run twice. The
+            // case mismatch in the original (-> 'installer') has been
+            // fixed.
+            installer_rrmdir(FERNICO_PATH . '/resources/Installer');
+
+            $success = true;
+        }
+    }
+}
+
+// ------------------------------ Render --------------------------------
+installer_header('Installer');
+echo '<h1>Install Solnew</h1>';
+
+if (isset($success) && $success === true) {
+    echo '<div class="alert alert-success">';
+    echo '<strong>Success!</strong> Solnew is installed. Redirecting to the admin login in 5 seconds&hellip;';
+    echo '</div>';
+    echo '<p>If you are not redirected, <a href="' . htmlspecialchars($siteUrl) . 'admin/login">click here</a>.</p>';
+    echo '<script>setTimeout(function(){window.location="' . htmlspecialchars($siteUrl) . 'admin/login";},5000);</script>';
+    installer_footer();
+    exit;
+}
+
+echo '<p>Fill in the details below to set up your faucet. The installer will create the database tables and your admin account.</p>';
+
+if ($error !== '') {
+    echo '<div class="alert alert-danger">' . $error . '</div>';
+}
+
+$default = function ($key, $fallback = '') {
+    return isset($_POST[$key]) ? htmlspecialchars($_POST[$key], ENT_QUOTES) : $fallback;
+};
+
+echo '<form method="post" action="">';
+echo '<h2>Site</h2>';
+echo '<div class="grid-2">';
+echo '<div class="form-row"><label for="domain">Website domain</label><input id="domain" type="text" name="domain" value="' . $default('domain', htmlspecialchars((string) ($_SERVER['HTTP_HOST'] ?? ''), ENT_QUOTES)) . '" required></div>';
+echo '<div class="form-row"><label for="contact_email">Contact email</label><input id="contact_email" type="email" name="contact_email" value="' . $default('contact_email') . '" required></div>';
+echo '</div>';
+
+echo '<h2>Database</h2>';
+echo '<div class="grid-2">';
+echo '<div class="form-row"><label for="db_host">Host</label><input id="db_host" type="text" name="db_host" value="' . $default('db_host', 'localhost') . '" required></div>';
+echo '<div class="form-row"><label for="db_name">Name</label><input id="db_name" type="text" name="db_name" value="' . $default('db_name') . '" required></div>';
+echo '<div class="form-row"><label for="db_user">User</label><input id="db_user" type="text" name="db_user" value="' . $default('db_user') . '" required></div>';
+echo '<div class="form-row"><label for="db_pass">Password</label><input id="db_pass" type="password" name="db_pass"></div>';
+echo '</div>';
+
+echo '<h2>Administrator account</h2>';
+echo '<div class="grid-2">';
+echo '<div class="form-row"><label for="user_name">Username</label><input id="user_name" type="text" name="user_name" value="' . $default('user_name') . '" required></div>';
+echo '<div class="form-row"><label for="password">Password</label><input id="password" type="password" name="password" required></div>';
+echo '</div>';
+
+echo '<button type="submit" name="submit" value="1">Install</button>';
+echo '</form>';
+
+installer_footer();

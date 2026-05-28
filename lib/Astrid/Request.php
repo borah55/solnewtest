@@ -1,125 +1,71 @@
 <?php
-
 /**
- * Fernico - Ridiculously lite PHP framework
+ * Thin convenience wrapper around superglobals.
  *
- * @author Areeb Majeed, Volcrado Holdings
+ * Provides safe getters with optional XSS sanitisation and a few helpers
+ * for HTTP method detection.
+ *
  * @package Fernico
- * @copyright 2017 - Volcrado Holdings Limited
- * @license https://opensource.org/licenses/MIT MIT License
- * @link https://volcrado.com/
- *
  */
 
 if (!defined('FERNICO')) {
-    fernico_destroy();
+    http_response_code(403);
+    exit('Forbidden');
 }
 
-class Request {
-
-    /*
-     * This function cleans the input and returns clean inputs.
-     * Recommended to use to clean the user inputs and to avoid XSS attacks.
-     *
-     * Usage: Request::cleanInput($my_xss_code);
+class Request
+{
+    /**
+     * Strip script/style tags and ad-hoc HTML; not a substitute for
+     * proper output escaping, but useful as a defence-in-depth filter.
      */
+    public static function cleanInput($input)
+    {
+        if (!is_string($input)) {
+            return $input;
+        }
 
-    static function cleanInput($input) {
-
-        $search = array(
+        $patterns = [
             '@<script[^>]*?>.*?</script>@si',
             '@<[\/\!]*?[^<>]*?>@si',
             '@<style[^>]*?>.*?</style>@siU',
-            '@<![\s\S]*?--[ \t\n\r]*>@'
-        );
+            '@<![\s\S]*?--[ \t\n\r]*>@',
+        ];
 
-        $output = preg_replace($search, '', $input);
-        return strip_tags($output);
-
+        return strip_tags(preg_replace($patterns, '', $input));
     }
 
-    /*
-     * You can retrieve a POST value using this function.
-     * Cleaning the user input can also be done on the go by setting the second parameter to true.
-     */
-
-    static function POST($key, $filtered = false) {
-
-        if (isset($_POST[$key])) {
-
-            if ($filtered == true) {
-
-                return self::cleanInput($_POST[$key]);
-
-            } else {
-
-                return $_POST[$key];
-
-            }
-
-        } else {
-
+    public static function POST($key, $filtered = false)
+    {
+        if (!isset($_POST[$key])) {
             return null;
-
         }
-
-
+        return $filtered ? self::cleanInput($_POST[$key]) : $_POST[$key];
     }
 
-    /*
-     * You can retrieve a GET value using this function.
-     * Cleaning the user input can also be done on the go by setting the second parameter to true.
-     */
-
-    static function GET($key, $filtered = false) {
-
-        if (isset($_GET[$key])) {
-
-            if ($filtered == true) {
-
-                return self::cleanInput($_GET[$key]);
-
-            } else {
-
-                return $_GET[$key];
-
-            }
-
-        } else {
-
+    public static function GET($key, $filtered = false)
+    {
+        if (!isset($_GET[$key])) {
             return null;
-
         }
-
-
+        return $filtered ? self::cleanInput($_GET[$key]) : $_GET[$key];
     }
 
-    /*
-     * You can retrieve a COOKIE value using this function.
-     * Cleaning the user input can also be done on the go by setting the second parameter to true.
-     */
-
-    static function COOKIE($key, $filtered = false) {
-
-        if (isset($_COOKIE[$key])) {
-
-            if ($filtered == true) {
-
-                return self::cleanInput($_COOKIE[$key]);
-
-            } else {
-
-                return $_COOKIE[$key];
-
-            }
-
-        } else {
-
+    public static function COOKIE($key, $filtered = false)
+    {
+        if (!isset($_COOKIE[$key])) {
             return null;
-
         }
-
-
+        return $filtered ? self::cleanInput($_COOKIE[$key]) : $_COOKIE[$key];
     }
 
+    public static function method()
+    {
+        return strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
+    }
+
+    public static function isPost()
+    {
+        return self::method() === 'POST';
+    }
 }

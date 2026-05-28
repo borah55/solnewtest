@@ -1,0 +1,19 @@
+# Generated configuration - never check in real DB credentials.
+/config/config.php
+
+# Smarty compiled templates and any other runtime cache files.
+/storage/cache/templates_c/*
+!/storage/cache/templates_c/index.php
+
+# Application logs.
+/storage/log/*.log
+
+# Editor / OS noise.
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+nbproject/
